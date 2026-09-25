@@ -9,6 +9,10 @@ GRID_SIZE = 10
 class World(NamedTuple):
     food: jax.Array #(X, Y) int
 
+    @property
+    def total_food(self):
+        return jnp.sum(self.food)
+
 class Creatures(NamedTuple):
     pos: jax.Array #(MAX_POPULATION, 2) int
     energy: jax.Array #(MAX_POPULATION, ) float
@@ -23,6 +27,15 @@ class Creatures(NamedTuple):
         # where iterates over creates alive, and returns its energy if its alive, or 0. Div by pop.
         return jnp.where(self.alive, self.energy, 0.0).sum() / jnp.maximum(self.population, 1)
 
+    # Returns the number of creatures per position
+    def per_position_count(self) -> jax.Array:
+        is_alive = self.alive.astype(float)
+        rows = self.pos[:, 0]
+        cols = self.pos[:, 1]
+        return jnp.zeros((GRID_SIZE, GRID_SIZE)).at[rows, cols].add(is_alive)
+
+
+# Single move step of all creatures
 def step(world: World, creature: Creatures, key: jax.Array) -> tuple[Creatures]:
     
     # Single step for a single creature
@@ -56,6 +69,24 @@ def init_creatures(key: jax.Array) -> Creatures:
     creatures = Creatures(initial_creatures, initial_creatures_energy, initial_creatures_alive)
     return creatures
 
+def eat(world: World, creature: Creatures, per_grid_count: jax.Array) -> tuple[Creatures]:
+
+    food_at_pos = world.food[creature.pos[0], creature.pos[1]]
+    # Avoid divide 0 for dead creature on a tile (registers as no creatures here)
+    divisor = jnp.maximum(per_grid_count[creature.pos[0], creature.pos[1]], 1.0)
+    our_share = food_at_pos / divisor
+    # Dead creatures don't get to eat
+    new_creature_energy = jnp.where(creature.alive, creature.energy + our_share, 0.0)
+
+    return Creatures(creature.pos, new_creature_energy, creature.alive)
+
+def zero_eaten_food(world: World, per_grid_count: jax.Array) -> tuple[World]:
+    new_food = jnp.where(per_grid_count > 0, 0, world.food)
+    new_world = World(new_food)
+    return new_world
+
+
+
 key = jax.random.key(0)
 
 key, food_rand = jax.random.split(key)
@@ -68,13 +99,20 @@ key, creatures_rand = jax.random.split(key)
 creatures = init_creatures(key)
 
 step_all = jax.vmap(step, in_axes=(None, 0, 0))
+eat_all = jax.vmap(eat, in_axes=(None, 0, None))
+zero_all = jax.vmap(zero_eaten_food, in_axes=(0, 0))
 # Simulate N steps
-for i in range(50):
-    keys, step_key = jax.random.split(key)
+for i in range(3):
+    key, step_key = jax.random.split(key)
     step_keys = jax.random.split(step_key, MAX_POPULATION)
     creatures = step_all(world, creatures, step_keys)
-    print(f"creatures mean energy: {creatures.mean_energy}")
-    print(f"Population alive {creatures.population}")
+    print(f"creatures mean energy pre eat: {creatures.mean_energy}")
+    print(f"total food pre eat {world.total_food}")
+    per_grid = creatures.per_position_count()
+    creatures = eat_all(world, creatures, per_grid)
+    world = zero_all(world, per_grid)
+    print(f"creatures mean energy post eat: {creatures.mean_energy}")
+    print(f"total food post eat {world.total_food}")
 
 
 
