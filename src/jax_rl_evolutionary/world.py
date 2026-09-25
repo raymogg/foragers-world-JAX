@@ -5,6 +5,7 @@ from typing import NamedTuple
 MAX_POPULATION = 5
 INITIAL_POPULATION = 2
 GRID_SIZE = 10
+SIMULATION_STEPS = 3
 
 class World(NamedTuple):
     food: jax.Array #(X, Y) int
@@ -85,34 +86,35 @@ def zero_eaten_food(world: World, per_grid_count: jax.Array) -> tuple[World]:
     new_world = World(new_food)
     return new_world
 
-
-
-key = jax.random.key(0)
-
-key, food_rand = jax.random.split(key)
-initial_food = jax.random.randint(food_rand, (GRID_SIZE, GRID_SIZE), 0, 5, dtype=int)
-world = World(initial_food)
-
-# Init some random creatures for using vmap
-key, creatures_rand = jax.random.split(key)
-# Put INITIAL_POPULATION creatures on the grid
-creatures = init_creatures(key)
-
+# Vmap functions
 step_all = jax.vmap(step, in_axes=(None, 0, 0))
 eat_all = jax.vmap(eat, in_axes=(None, 0, None))
 zero_all = jax.vmap(zero_eaten_food, in_axes=(0, 0))
-# Simulate N steps
-for i in range(3):
-    key, step_key = jax.random.split(key)
-    step_keys = jax.random.split(step_key, MAX_POPULATION)
-    creatures = step_all(world, creatures, step_keys)
-    print(f"creatures mean energy pre eat: {creatures.mean_energy}")
-    print(f"total food pre eat {world.total_food}")
-    per_grid = creatures.per_position_count()
-    creatures = eat_all(world, creatures, per_grid)
-    world = zero_all(world, per_grid)
-    print(f"creatures mean energy post eat: {creatures.mean_energy}")
-    print(f"total food post eat {world.total_food}")
+
+if __name__ == "__main__":
+    key = jax.random.key(0)
+
+    key, food_rand = jax.random.split(key)
+    initial_food = jax.random.randint(food_rand, (GRID_SIZE, GRID_SIZE), 0, 5, dtype=int)
+    world = World(initial_food)
+
+    # Init some random creatures for using vmap
+    key, creatures_rand = jax.random.split(key)
+    # Put INITIAL_POPULATION creatures on the grid
+    creatures = init_creatures(key)
+
+    # Simulate N steps
+    for i in range(SIMULATION_STEPS):
+        key, step_key = jax.random.split(key)
+        step_keys = jax.random.split(step_key, MAX_POPULATION)
+        creatures = step_all(world, creatures, step_keys)
+        print(f"creatures mean energy pre eat: {creatures.mean_energy}")
+        print(f"total food pre eat {world.total_food}")
+        per_grid = creatures.per_position_count()
+        creatures = eat_all(world, creatures, per_grid)
+        world = zero_all(world, per_grid)
+        print(f"creatures mean energy post eat: {creatures.mean_energy}")
+        print(f"total food post eat {world.total_food}")
 
 
 
