@@ -18,16 +18,33 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import jax
 import jax.numpy as jnp
 
-from jax_rl_evolutionary.world import (
+from jax_duck_farm.world import (
     GRID_SIZE,
     MAX_POPULATION,
     Creatures,
     World,
+    compute_breed_rank,
     eat_all,
     init_creatures,
     step_all,
     zero_eaten_food,
 )
+
+BREED_ENERGY = 4.0  # compute_breed_rank's eligibility threshold
+
+
+def _ducks(positions, energies, alives):
+    """Build a full-size Creatures from a short list, padding the unused slots.
+
+    Padding matters: every slot is computed over, so the padding must not
+    accidentally look eligible. Dead + zero energy is inert.
+    """
+    n = len(positions)
+    assert n <= MAX_POPULATION
+    pos = jnp.zeros((MAX_POPULATION, 2), dtype=int).at[:n].set(jnp.array(positions))
+    energy = jnp.zeros((MAX_POPULATION,)).at[:n].set(jnp.array(energies, dtype=float))
+    alive = jnp.zeros((MAX_POPULATION,), dtype=bool).at[:n].set(jnp.array(alives))
+    return Creatures(pos, energy, alive)
 
 
 def test_food_shared_evenly():
@@ -235,6 +252,120 @@ def test_randomness_actually_advances():
     assert len(set(map(tuple, seen))) > 1, (
         "creature 0 never changed position -- key is probably not advancing"
     )
+
+
+def test_breed_rank_paper_case():
+    """The hand-worked example: ducks rank 0,1,2.. among eligible peers on their tile.
+
+    4 ducks on tile (4,4) but slot 3 is INELIGIBLE (energy below threshold),
+    so the eligible ones there rank 0, 1, 2 -- skipping slot 3 entirely.
+    Slot 3 gets -1 even though it sits among them. Slots 2 and 5 are alone on
+    their own tiles, so each ranks 0.
+    """
+    ducks = _ducks(
+        positions=[[4, 4], [4, 4], [7, 1], [4, 4], [4, 4], [0, 0]],
+        energies=[10.0, 10.0, 10.0, 1.0, 10.0, 10.0],  # slot 3 too poor to breed
+        alives=[True] * 6,
+    )
+    rank = compute_breed_rank(ducks)
+
+    assert rank[:6].tolist() == [0, 1, 0, -1, 2, 0], rank[:6].tolist()
+    # Unused padding slots are dead, so all ineligible.
+    assert (rank[6:] == -1).all(), "padding slots should be ineligible"
+
+
+def test_breed_rank_dead_ducks_excluded():
+    """A dead duck is never eligible, and never occupies a rank.
+
+    Slot 1 is dead but has plenty of energy and sits on the shared tile. If
+    the alive mask were dropped it would take rank 1 and push slot 2 to 2.
+    """
+    ducks = _ducks(
+        positions=[[3, 3], [3, 3], [3, 3]],
+        energies=[10.0, 10.0, 10.0],
+        alives=[True, False, True],
+    )
+    rank = compute_breed_rank(ducks)
+    assert rank[:3].tolist() == [0, -1, 1], rank[:3].tolist()
+
+
+def test_breed_rank_nobody_eligible():
+    """No eligible ducks -> every rank is -1, and nothing errors."""
+    ducks = _ducks(
+        positions=[[1, 1], [1, 1], [2, 2]],
+        energies=[0.5, 1.0, 2.0],  # all below BREED_ENERGY
+        alives=[True, True, True],
+    )
+    rank = compute_breed_rank(ducks)
+    assert (rank == -1).all(), "nobody should be eligible"
+
+
+def test_breed_rank_all_on_one_tile():
+    """N eligible ducks on one tile get exactly the ranks 0..N-1, no repeats.
+
+    A repeat here would mean two ducks pair with the same partner.
+    """
+    n = 8
+    ducks = _ducks(
+        positions=[[5, 5]] * n,
+        energies=[10.0] * n,
+        alives=[True] * n,
+    )
+    rank = compute_breed_rank(ducks)
+    assert sorted(rank[:n].tolist()) == list(range(n)), rank[:n].tolist()
+
+
+def test_breed_rank_all_on_separate_tiles():
+    """Ducks alone on their own tiles all rank 0 -- rank is per-tile, not global."""
+    n = 6
+    ducks = _ducks(
+        positions=[[i, 0] for i in range(n)],
+        energies=[10.0] * n,
+        alives=[True] * n,
+    )
+    rank = compute_breed_rank(ducks)
+    assert rank[:n].tolist() == [0] * n, rank[:n].tolist()
+
+
+def test_breed_rank_threshold_is_inclusive():
+    """Energy exactly at the threshold is eligible; just under is not.
+
+    Pins the boundary so a >= / > slip shows up as a failure.
+    """
+    ducks = _ducks(
+        positions=[[2, 2], [2, 2]],
+        energies=[BREED_ENERGY, BREED_ENERGY - 0.01],
+        alives=[True, True],
+    )
+    rank = compute_breed_rank(ducks)
+    assert rank[0] == 0, "energy at the threshold should be eligible"
+    assert rank[1] == -1, "energy below the threshold should not be eligible"
+
+
+def test_breed_rank_ranks_are_contiguous_per_tile():
+    """On any tile, the eligible ducks' ranks are exactly 0..k-1.
+
+    A property over random states rather than a fixed case: catches gaps and
+    duplicates that a hand-built example might miss.
+    """
+    key = jax.random.key(7)
+    for _ in range(20):
+        key, kp, ke, ka = jax.random.split(key, 4)
+        pos = jax.random.randint(kp, (MAX_POPULATION, 2), 0, 3)  # small grid -> collisions
+        energy = jax.random.uniform(ke, (MAX_POPULATION,), minval=0.0, maxval=8.0)
+        alive = jax.random.uniform(ka, (MAX_POPULATION,)) > 0.3
+        ducks = Creatures(pos, energy, alive)
+
+        rank = compute_breed_rank(ducks)
+        eligible = alive & (energy >= BREED_ENERGY)
+        flat = pos[:, 0] * GRID_SIZE + pos[:, 1]
+
+        for tile in jnp.unique(flat).tolist():
+            on_tile = (flat == tile) & eligible
+            got = sorted(rank[on_tile].tolist())
+            assert got == list(range(len(got))), (
+                f"tile {tile}: ranks {got} are not contiguous from 0"
+            )
 
 
 if __name__ == "__main__":

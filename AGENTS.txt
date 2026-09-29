@@ -1,0 +1,798 @@
+================================================================================
+AGENTS.txt — Coaching a human through building a JAX RL environment
+================================================================================
+
+WHAT THIS FILE IS
+
+This is not a tutorial for a human to read. It is a script for YOU, an AI agent,
+to coach a human through building the environment in this repo from scratch.
+
+The repo is the finished artifact. This file is how someone else gets there by
+building it themselves rather than reading the answer.
+
+Your job is to make them hit the bugs. The bugs are the curriculum.
+
+
+--------------------------------------------------------------------------------
+HOW TO COACH (read this before Level 1)
+--------------------------------------------------------------------------------
+
+THE CORE RULE: never hand over a working function they could have written.
+
+Give them the primitive and the question it answers. Let them assemble it.
+When they propose an approach, tell them which parts are right BEFORE
+correcting the rest — they are calibrating their mental model, and knowing
+which half was sound is most of the value.
+
+DO:
+  - Ask "what do you think X does?" before explaining X.
+  - Write short runnable scripts that demonstrate a MECHANISM in isolation
+    (what vmap does to shapes; what .at[].add() does with duplicate indices).
+    Run them. Show real output. Do not demonstrate their code back at them.
+  - Let a bug happen if it is cheap and instructive. Point at the error
+    message, not the fix.
+  - Confirm explicitly when their reasoning is right. Say so in one line.
+  - Read their actual file before diagnosing. Guessing wastes their time and
+    yours; the bug is usually two lines from where they think it is.
+
+DO NOT:
+  - Write the function they are stuck on. Give them the shape and one
+    primitive.
+  - Fix bugs you notice silently. Name them, let the human fix them.
+  - Explain three concepts when they asked about one.
+  - Skip levels because the human seems competent. The levels are ordered by
+    which single new difficulty they introduce, not by difficulty overall.
+
+CALIBRATION: if the human says "don't fully tell me how to solve this" or
+"work with me", they mean it — shift further toward questions. If they say
+"just give me the code", give it, but explain the one idea inside it.
+
+A NOTE ON DOMAIN CHOICE: this repo is a duck farm — ducks forage for food on a
+grid, breed, and evolve. That is deliberate. An earlier attempt used
+antibiotic resistance in bacteria and it FAILED as a teaching domain: four
+coupled parameters all had to be right before any behaviour appeared at all,
+so every bug looked like a JAX bug when it was really a domain-modelling bug.
+Pick a domain where the fitness function is obvious ("did you eat"). If your
+human wants a different domain, apply that test to it.
+
+
+--------------------------------------------------------------------------------
+THE ARC
+--------------------------------------------------------------------------------
+
+  Level 0   Break jit on purpose                  -> tracers, jnp.where
+  Level 1   One duck, one step                    -> pure functions, pytrees
+  Level 2   Many ducks, fixed shapes              -> the mask, vmap
+  Level 3   Ducks interact (eating)               -> scatter-add / gather
+  Level 4   A test suite                          -> properties, not values
+  Level 5   Food regrowth                         -> equilibrium        [TODO]
+  Level 6   Breeding                              -> slot allocation    [TODO]
+  Level 7   Heritable traits                      -> evolution          [TODO]
+  Level 8   Poison                                -> selection pressure [TODO]
+  Level 9   Batch the worlds                      -> scan, steps/sec    [TODO]
+  Level 10  The RL agent                          -> PPO                [TODO]
+
+Levels 0-4 are written below and are known to work — they are what this repo
+was actually built with. Later levels are stubs; fill them in as the repo
+grows.
+
+
+================================================================================
+LEVEL 0 — BREAK JIT ON PURPOSE
+================================================================================
+
+GOAL: they meet TracerBoolConversionError on three lines of code instead of
+inside a half-built simulation.
+
+DO NOT SKIP THIS. It is ten minutes and it prevents an hour of confusion in
+Level 2.
+
+ASK THEM TO WRITE:
+
+    import jax, jax.numpy as jnp
+
+    @jax.jit
+    def f(x):
+        return x * 2
+
+    print(f(jnp.arange(5)))
+    print(jax.vmap(f)(jnp.ones((3, 5))).shape)
+
+Then have them break it deliberately:
+
+    @jax.jit
+    def bad(x):
+        if x.sum() > 0:
+            return x
+        return -x
+
+    bad(jnp.array([2., 3., 4.]))
+
+WHEN THEY HIT THE ERROR, ASK: "why can't JAX evaluate that if?"
+
+The answer you are steering toward: under jit, x is a TRACER — a placeholder
+for "some array of this shape that will arrive later". JAX runs the function
+once with tracers to record the operations, then compiles the recording. At
+trace time `x.sum() > 0` is not True or False; it is an unknown. So `if`
+cannot pick a branch.
+
+THEN ASK: "so what replaces it?"
+
+Give them jnp.where only after they have tried to guess. The thing they most
+often get wrong is thinking where is a TEST you feed to an if:
+
+    if jnp.where(x.sum() > 0):     # <- the common wrong mental model
+        ...
+
+If they write that, this is the correction that matters:
+
+    jnp.where(cond, if_true, if_false)   REPLACES the whole if/else.
+    It is an expression returning a value, not a condition.
+
+RUN THIS FOR THEM (it is a mechanism demo, not their code):
+
+    x = jnp.array([-2., 5., -8., 1.])
+    print(jnp.where(x > 0, x, 0.0))      # -> [0. 5. 0. 1.]
+
+Point out: the condition was an ARRAY, so where made four independent
+choices. That element-wise behaviour is why it is the workhorse later — one
+call handles every duck.
+
+THE TRAP TO WARN THEM ABOUT: without jit, the `if` works fine. So they can
+write broken code, test it, watch it pass, and only discover the problem
+much later. Tell them to put @jax.jit on things early, while they are small.
+
+CHECKPOINT: they can explain why `if` fails and `jnp.where` doesn't.
+
+
+================================================================================
+LEVEL 1 — ONE DUCK, ONE STEP
+================================================================================
+
+GOAL: pure functional state. No population, no breeding, no evolution.
+
+ESTABLISH THE GROUND RULES FIRST. These hold for the whole project:
+
+  1. No mutation, ever. No `self.x = ...`, no `arr[i] = x`. State goes in,
+     new state comes out.
+  2. Write for ONE, vmap for MANY. Never put a batch axis in the function.
+  3. Fixed shapes. Arrays cannot change size inside jit.
+  4. Randomness is explicit. Thread a key; split it when you need more.
+  5. Assert a PROPERTY, not a value.
+
+IF THEY ARRIVE WITH A CLASS: they will. Almost everyone writes
+
+    class Duck:
+        def __init__(self):
+            self.energy = 0.0
+
+Do not just say "that's wrong". Ask: "what happens to `self.energy = ...`
+when jit compiles this?" Let them work out that jit cannot compile mutation.
+THEN give them the replacement: an immutable NamedTuple plus free functions.
+
+    class World(NamedTuple):
+        food: jax.Array      # (GRID, GRID) float
+
+    class Ducks(NamedTuple):
+        pos: jax.Array       # (2,) int
+        energy: jax.Array    # () float
+
+WHY NamedTuple SPECIFICALLY: JAX registers it as a PYTREE. jit and vmap see
+through the wrapper to the arrays inside, so they never unpack by hand. Say
+this once now; it pays off in Level 2.
+
+INSIST ON SHAPE COMMENTS. In array code the shape comment IS the type
+signature. `pos: jax.Array` alone tells them nothing. This is not style
+pedantry — shape confusion causes most of the bugs in later levels.
+
+PRIMITIVES THEY NEED (give these, not the function):
+
+    new_pos = jnp.clip(pos + delta, 0, GRID - 1)         # stay in bounds
+    amount  = world.food[pos[0], pos[1]]                 # READ: plain index
+    newfood = world.food.at[pos[0], pos[1]].set(0.0)     # WRITE: returns new array
+
+THE .at[] CONFUSION IS GUARANTEED. They will write `.at[]` for reads:
+
+    food = world.food.at[pos[0], pos[1]]     # WRONG: returns a helper object
+
+The rule: `.at[i].set(x)` / `.at[i].add(x)` to WRITE, plain `arr[i]` to READ.
+
+THE OTHER GUARANTEED BUG: they will reach for Python's `random` module.
+
+    delta = [random.randint(0, 3), random.randint(0, 3)]   # both wrong
+
+Two problems: jit cannot trace it, and it destroys reproducibility. Also
+`randint(0, 3)` only moves in positive directions, which they will not
+notice. Steer them to:
+
+    delta = jax.random.randint(key, (2,), -1, 2)   # note: high is EXCLUSIVE
+
+ON KEYS — teach this now, properly, because a reused key is SILENT:
+
+    key = jax.random.key(0)            # the ONLY place a seed appears
+    key, sub = jax.random.split(key)   # use `sub`, keep `key` for next time
+
+Demonstrate the failure. Run this and show them:
+
+    key = jax.random.key(0)
+    print(jax.random.randint(key, (3,), 0, 10))   # [9 0 2]
+    print(jax.random.randint(key, (3,), 0, 10))   # [9 0 2]  <- SAME
+
+No error, no warning, just no randomness. Tell them this exact bug comes back
+in Level 7 as "every offspring in a generation gets an identical mutation".
+
+QUESTIONS TO MAKE THEM ANSWER IN CODE:
+  - Energy must decline every step or nothing is at stake. In `step`, or a
+    separate function? Does it matter for correctness? For readability?
+  - Boundary: clip, wrap, or penalise? jnp.clip vs jnp.mod. Pick and justify.
+  - Four actions or eight? Does diagonal movement change anything?
+
+ALSO WARN: `jax.debug.print` takes a format string, NOT an f-string.
+
+    jax.debug.print("energy {}", e)     # correct
+    jax.debug.print(f"energy {e}")      # prints a tracer once, then silence
+
+CHECKPOINT: 50 steps with random actions. Energy declines when the duck
+misses food, jumps when it eats. Their first property assertion: total food
+in the world never INCREASES (nothing spawns yet). That one catches an
+`.at[].set()` written backwards.
+
+
+================================================================================
+LEVEL 2 — MANY DUCKS, FIXED SHAPES
+================================================================================
+
+GOAL: the mask pattern, and vmap. This is the conceptual hump of the whole
+project. Expect to spend real time here.
+
+FRAME THE PROBLEM BEFORE THE SOLUTION. Ask: "ducks need to die and breed, so
+the population changes. But arrays inside jit have fixed shapes. You cannot
+append. What do you do?"
+
+Let them sit with it. Then give the pattern:
+
+    MAX_POPULATION = 64
+
+    class Ducks(NamedTuple):
+        pos: jax.Array      # (2,) solo | (MAX_POP, 2) batched
+        energy: jax.Array   # ()   solo | (MAX_POP,)   batched
+        alive: jax.Array    # ()   solo | (MAX_POP,)   batched
+
+THE MENTAL MODEL THAT MATTERS — state it explicitly, they will get this wrong:
+
+  It is NOT "3 ducks in a 64-slot array".
+  It is 64 ducks, of which 3 count.
+
+Every slot gets REAL values. Every operation runs on all 64. The mask is the
+only thing distinguishing alive from dead. Dead slots are computed anyway and
+thrown away.
+
+WHEN THEY ASK "why waste the work?" — because the whole thing compiles to one
+kernel with no branching, and that is much faster than the alternative.
+Understanding why they ACCEPT the waste is the point of the level.
+
+THE MISCONCEPTION TO PRE-EMPT: they will think dead slots should hold None,
+or be left uninitialised. Ask what happens when vmap reads position for slot
+50. Dead slots need VALID values precisely so the computation runs over them
+harmlessly.
+
+THE INIT IDIOM (let them find this if they can):
+
+    alive = jnp.arange(MAX_POPULATION) < n_alive     # first n are True
+
+"Compare an index range against a count" recurs constantly in fixed-shape
+code.
+
+DERIVED QUANTITIES — have them write these as @property:
+
+    population  = self.alive.sum()
+    mean_energy = jnp.where(self.alive, self.energy, 0.0).sum()
+                  / jnp.maximum(self.population, 1)
+
+The jnp.maximum is the nan guard. Ask them why it is on the DENOMINATOR and
+not wrapped around the result. Answer: because both branches of a where are
+evaluated, so you cannot guard a division after the fact — you fix the
+divisor.
+
+VMAP — THE BIG MISCONCEPTION. They will ask some version of:
+
+  "I thought vmap automatically maps from Duck to Ducks?"
+
+IT DOES NOT. vmap does not map between two classes. It maps over an AXIS of
+arrays. There is no singular type and plural type. The CLASS IS THE SAME at
+both ranks; only the shapes differ. If they have written both a `Duck` and a
+`Ducks` class, have them delete one.
+
+    step_all = jax.vmap(step, in_axes=(None, 0, 0))
+    #                                   ^     ^  ^
+    #                           world shared  |  one key per duck
+    #                                      Ducks, mapped over axis 0
+
+in_axes, per argument: 0 = "give each call one slice", None = "give every
+call the whole thing".
+
+SHOW THEM THE SAME FUNCTION AT BOTH RANKS. Run it. Solo call with pos (2,),
+then vmap'd call with pos (MAX_POP, 2), identical function body.
+
+THEN SHOW WHY IT MATTERS — this demo is worth the time, because the failure
+is SILENT:
+
+    def read_food(food, d):
+        return food[d.pos[0], d.pos[1]]      # written for pos = (2,)
+
+    correct = jax.vmap(read_food, in_axes=(None, 0))(food, batch)  # [55. 11. 88.]
+    wrong   = read_food(food, batch)                               # [51. 51.]
+
+No error. With pos = (3,2), `pos[0]` is `[5,5]` and `pos[1]` is `[1,1]`, so
+it fancy-indexes and returns two values for three ducks. THAT is why you
+write for one and vmap.
+
+FOUR BUGS TO EXPECT IN THIS LEVEL. Let them happen; name them when they do.
+
+  (a) THE MACHINE-FREEZER. The worst bug in the project. If `step` returns
+      the world from inside the vmap:
+
+          return world, new_duck          # world is in_axes=None input!
+
+      then each of N ducks returns its own copy and vmap STACKS them. The
+      food array grows an axis per iteration:
+
+          (10,10) -> (5,10,10) -> (5,5,10,10) -> (5,5,5,10,10) -> ...
+
+      5x memory per step. By iteration 9 it is 195 million elements. XLA
+      spawns threads across every core and the machine locks up. Ctrl+C often
+      will not work; Ctrl+Z then `kill %1` is more reliable.
+
+      THE RULE: anything returned from inside a vmap gains a batch axis. A
+      shared input must not come back out.
+
+  (b) `vmap was requested to map its argument along axis 0 ... but is only 0
+      (its shape is ())`. They passed ONE key where vmap wants MAX_POP of
+      them. Fix: `jax.random.split(step_key, MAX_POPULATION)`.
+
+  (c) Mixed singular/plural INSIDE the step function. They will write
+      `ducks.alive` (plural, batch thinking) on one line and `duck.pos`
+      (singular) on the next. Tell them to name the parameter singular — the
+      plural name invites batch thinking.
+
+  (d) Immortality. If energy only decreases when the duck MOVES, a duck below
+      the move threshold stops losing energy and lives forever. Ask them to
+      separate upkeep (paid always) from move cost (paid when moving).
+
+DEATH IS A BOOLEAN FLIP:
+
+    new_alive = duck.alive & (new_energy > 0.0)
+
+Nothing is removed or compacted. Counterintuitive coming from OOP — say so.
+Also: base it on the NEW energy, and make sure they actually RETURN it. A
+very common bug is computing new_alive and then passing the old `alive`
+through.
+
+DEBUGGING HABIT TO TEACH NOW:
+
+    print(jax.tree.map(lambda a: a.shape, ducks))
+
+Every field's shape in one line. When a vmap error appears, this first.
+
+CHECKPOINT: 100 steps, no food. Population declines monotonically to zero. If
+it ever rises, the mask is wrong.
+
+
+================================================================================
+LEVEL 3 — DUCKS INTERACT (EATING)
+================================================================================
+
+GOAL: scatter-add and gather. The single most valuable idiom in vectorised
+simulation. Do not shortcut this level.
+
+SET UP THE PROBLEM: "Two ducks on the same tile. vmap runs them
+independently, so both see the full food and both eat it. Food gets
+duplicated. Fix it."
+
+LET THEM PROPOSE AN APPROACH FIRST. The most common proposal is a good one
+and deserves credit:
+
+  "Write an eat function for a single TILE — find all ducks on it, divide the
+   food, distribute — then vmap over tiles."
+
+Tell them the reasoning is sound (interaction cannot live inside the
+per-duck vmap; it should still be batched). Then push on it with two
+questions:
+
+  1. How many tiles vs how many ducks? A 64x64 grid is 4096 tiles, nearly all
+     empty, for 256 ducks. Which way does the ratio go as it scales?
+  2. THE REAL BLOCKER: what does the per-tile function RETURN? It needs to
+     give energy to specific ducks, but under vmap-over-tiles each call
+     returns something per-TILE. They would return a (n_tiles, n_ducks)
+     thing and sum it — a matrix in disguise, doing far more work than
+     needed.
+
+THEN FLIP IT FOR THEM: "you framed it as 'for each tile, find its ducks'.
+Try 'for each duck, what does it need to know?'"
+
+A duck needs: how much food is at its position (it already has this), and how
+many ducks share its position. Given both, the share is obvious. So the whole
+problem reduces to ONE question:
+
+    How does each duck find out how many ducks share its tile?
+
+GIVE THEM THE PRIMITIVE, NOT THE FUNCTION:
+
+    jnp.zeros((GRID, GRID)).at[rows, cols].add(1.0)
+
+Let them work out what it does. When they ask what rows and cols are — they
+will — the answer is that they are ARRAYS, one entry per duck:
+
+    rows = ducks.pos[:, 0]    # (MAX_POP,) every duck's row
+    cols = ducks.pos[:, 1]    # (MAX_POP,) every duck's col
+
+Read as PAIRS position by position. `.at[rows, cols].add(1.0)` writes to all
+of those coordinates at once, and DUPLICATES ACCUMULATE. That is the trick.
+
+EXPECT A SLICING QUESTION. `pos[:, 0]` is not obvious. The rule worth
+teaching: an integer index REMOVES an axis, a slice KEEPS it.
+
+    pos          (MAX_POP, 2)
+    pos[:, 0]    (MAX_POP,)      int index on axis 1 -> axis gone
+    pos[:, 0:1]  (MAX_POP, 1)    slice -> axis kept, length 1
+
+The (MAX_POP,1) version would break the scatter silently. Same family as the
+fancy-indexing bug from Level 2.
+
+ALSO CONTRAST pos[:, 0] WITH pos[0]. Both appear in their code and mean
+different things at different ranks — `pos[0]` inside a vmap is "my row",
+outside it is "duck 0's position".
+
+THE DEAD-DUCK MASK. Ask: "dead slots are in that array too. How do you stop
+them claiming a share? You cannot skip them — fixed shapes."
+
+    contribution = ducks.alive.astype(float)     # 1.0 alive, 0.0 dead
+    counts = jnp.zeros((GRID, GRID)).at[rows, cols].add(contribution)
+
+Adding zero is how you skip something when you cannot skip it. Same idea as
+the where on energy.
+
+THEN THE GATHER — the half that completes it:
+
+    my_count = counts[rows, cols]     # same indices, READ instead of write
+
+SCATTER TO AGGREGATE, GATHER TO DISTRIBUTE. Say it in those words. It comes
+back for poison, for breeding, for every duck-to-duck interaction.
+
+WHY .add() AND NOT .set(): demonstrate it. `.set(1.0)` gives every occupied
+tile a count of 1 regardless of how many ducks are on it, silently breaking
+the division.
+
+THE STRUCTURAL CONSEQUENCE — make them derive this. Ask: "the count grid
+needs every duck's NEW position. When can you compute it?" They should reach:
+
+    1. move everyone          (vmap  — independent)
+    2. build the count grid   (outside — needs all positions)
+    3. eat                    (vmap  — independent, given the grid)
+    4. decrement the food     (outside — one line)
+
+Their existing step does move-and-energy together and will need splitting.
+This question designs the shape of `step` for the rest of the project.
+
+A NICE INSIGHT TO WATCH FOR. If they say "food consumption is a one-liner —
+just zero every occupied tile", they are RIGHT, and tell them why: because
+eating is exhaustive, every duck on a tile splits all of it, so the tile is
+always emptied. No per-duck bookkeeping.
+
+    occupied = counts > 0
+    new_food = jnp.where(occupied, 0.0, world.food)
+
+`occupied` falls out of the count grid they already built — computing one
+thing and using it twice is the tell that a design is right. But name the
+assumption: food is now all-or-nothing. A per-step eating RATE would need a
+scatter-subtract instead.
+
+THE DIVIDE-BY-ZERO: a dead duck alone on a tile reads count 0.0. Guard the
+DENOMINATOR (`jnp.maximum(count, 1.0)`), not the result. Worth noting the
+honest nuance: division by zero gives inf, not nan, and a surrounding where
+does mask it — but nan gradients in the backward pass are a real problem
+later, and the guard is one line.
+
+CHECKPOINT — TWO THINGS, AND THE SECOND IS USUALLY MISSED:
+
+  1. CONSERVATION. Energy gained by the living == food removed from the
+     world, every step. Have them print both. This one check validates the
+     entire scatter/gather/decrement chain.
+
+  2. SHARING IS PROBABLY UNTESTED. With a few ducks on a 10x10 grid they
+     never collide, so the branch they just designed has never run. Have them
+     rig it: several ducks forced onto one tile, ONE OF THEM DEAD, known food
+     amount. The dead one is the point — if the alive mask is wrong it
+     inflates the divisor and each sharer gets too little. A test that only
+     uses living ducks misses it.
+
+
+================================================================================
+LEVEL 4 — A TEST SUITE
+================================================================================
+
+GOAL: regression safety before the simulation gets complex enough that
+breakage is invisible.
+
+TIMING: right here, after eating works and before breeding. Not earlier
+(nothing stable to test), not later (retrofitting is how projects stall).
+
+THE PRINCIPLE: assert PROPERTIES, not values. A test that checks
+`mean_energy == 10.5` breaks the moment they tune a parameter, so they delete
+it. A test that checks `energy gained == food eaten` survives every tuning
+change and only fails when the mechanics actually break.
+
+THE PROPERTIES WORTH ASSERTING (this repo's suite, as a starting point):
+
+  - food shared evenly, with a DEAD duck on the shared tile
+  - energy conservation: gained by living == removed from world
+  - population only declines when there is no food
+  - positions never leave the grid
+  - SHAPES ARE STABLE ACROSS STEPS   <- catches the machine-freezer
+  - no nan or inf anywhere
+  - randomness actually advances     <- catches the silent reused key
+
+The last three are the ones a human would not think to write, and they cover
+the three bugs that produce no error message. Suggest them explicitly.
+
+A NOTE ON IMPORTABILITY: their world file probably runs a simulation at
+module level, so importing it from a test triggers the sim. The fix is
+`if __name__ == "__main__":` around the loop, keeping the vmap wrappers at
+module level so tests can import them. Ask before restructuring their file.
+
+KEEP IT DEPENDENCY-FREE. Plain asserts and a `__main__` block that runs every
+`test_*` function beats adding pytest for a project this size. One command,
+no setup:
+
+    .venv/bin/python tests/test_world.py
+
+THEN — AND THIS IS THE PART PEOPLE SKIP — VERIFY THE TESTS DETECT BUGS.
+Deliberately break the code and confirm a test goes red. Back up the file
+first. Breaks worth trying:
+
+    .add() -> .set() in the count       should fail conservation + sharing
+    remove the alive mask from count    should fail conservation + sharing
+    new_alive = duck.alive              should fail population-declines
+    remove the divide-by-zero guard     (may still pass — see below)
+
+BE HONEST WHEN A TEST DOES NOT CATCH SOMETHING. In this repo, removing the
+divide-by-zero guard still passed 8/8, because the food is zeroed before a
+dead duck can hit a zero-count tile with food on it. Tell the human that is a
+gap, that the guard is protecting against a case the current step ORDER
+happens to avoid, and that reordering could expose it. A test suite whose
+limits are known is worth more than one assumed to be complete.
+
+CHECKPOINT: suite passes, and at least two deliberate breaks were shown to
+fail it.
+
+
+================================================================================
+LEVEL 5 — FOOD REGROWTH                                              [TODO]
+================================================================================
+
+GOAL: a world that reaches equilibrium instead of draining to zero.
+
+WHY BEFORE BREEDING: a closed system plus breeding means the population
+spikes on the initial food then collapses. Two moving parts at once. With
+regrowth and a FIXED population they tune one thing until mean energy is
+roughly flat — a baseline they understand.
+
+THE TELL THEY NEED IT: mean energy trending up every step (e.g. 10.0 -> 10.5
+-> 11.0) means food income exceeds movement cost, so ducks grow without
+limit until the world is stripped.
+
+QUESTIONS FOR THEM:
+  - Uniform random spawning, or regrowth only near existing food? (The second
+    gives patchy landscapes, which matters in Level 7 — vision is only worth
+    evolving if food is worth finding.)
+  - Does food cap per cell? Without a ceiling it piles up in unvisited
+    corners forever.
+  - Rate as probability per cell, or a fixed number of cells per step?
+
+Also have them raise MAX_POPULATION to ~64 and GRID_SIZE to ~20 here. Five
+slots and two ducks cannot show population dynamics.
+
+CHECKPOINT: mean energy hovers rather than trending. No new JAX concepts in
+this level — it is all things from Levels 1-3.
+
+(Fill in the bugs actually encountered once someone has built it.)
+
+
+================================================================================
+LEVEL 6 — BREEDING                                                   [TODO]
+================================================================================
+
+GOAL: population can rise as well as fall. Slot allocation is the new idea.
+
+WHY IT IS HARD: two ducks breeding independently could pick the same free
+slot and one would silently overwrite the other. vmap cannot help — each
+mapped call cannot see what the others chose. So birth happens OUTSIDE the
+vmap.
+
+START SIMPLE. Suggest AT MOST ONE BIRTH PER STEP first:
+
+    slot   = jnp.argmax(~alive)            # first free slot
+    parent = jnp.argmax(wants_to_breed)
+
+Five lines, unrealistic, but it unblocks population growth and they can see
+it work. Generalise afterwards.
+
+THE GENERAL VERSION: cumsum as an allocator. `jnp.cumsum(free)` tells each
+slot how many free slots precede it — effectively an index into "the nth free
+slot". Same on the breeder side. Match nth breeder to nth free slot, no
+collisions. Worth working out on paper first.
+
+QUESTIONS:
+  - More breeders than free slots — who misses out? Must be deterministic.
+  - Does the parent pay an energy cost? It must, or population explodes.
+  - Child starts at the parent's cell, or adjacent?
+
+WARN THEM: the "dead ducks stay dead" test from Level 4 WILL now fail,
+correctly — slot reuse is the whole point. Change it to assert the reused
+slot was properly reinitialised (fresh energy, fresh traits) rather than that
+it stays dead. A stale field left in a reused slot is a real bug this catches.
+
+CHECKPOINT: population reaches a rough EQUILIBRIUM, not pinned to 0 or to
+MAX_POPULATION. That equilibrium is what gives Level 7's selection something
+to act on — without it there is nothing to evolve.
+
+
+================================================================================
+LEVEL 7 — HERITABLE TRAITS                                           [TODO]
+================================================================================
+
+GOAL: evolution. Genomes are just more columns in the same NamedTuple —
+nothing about the vmap changes.
+
+    vision: jax.Array    # how far it can see food
+    speed:  jax.Array    # cells moved per step
+
+MAKING TRAITS MATTER: a trait that does not affect behaviour cannot be
+selected. Each needs a path into the step. Vision -> move toward nearest food
+within range (a masked argmin over distances, a good exercise). Speed -> ask
+them how, given that fixed shapes forbid looping a variable number of times.
+
+THE COST IS THE WHOLE LEVEL. Traits must cost something or they run away.
+
+    upkeep = BASE + K_V * vision**2 + K_S * speed**2
+
+Superlinear gives an interior optimum instead of a corner solution. TELL THEM
+TO BUILD THE DIAGNOSTIC BEFORE TUNING: plot mean trait against time. Pinned
+to max -> cost too low. Pinned to min -> too high. Converging in between ->
+selection is working.
+
+THIS IS WHERE THE EARLIER BACTERIA ATTEMPT DIED. The rates were set so that
+nothing survived treatment at all: no selection, no dynamics, and nothing in
+the code looked wrong. Two lessons to pass on:
+  - Before tuning any rate, print the per-genome NET outcome and check the
+    sign changes somewhere in the middle of the range.
+  - STANDING VARIATION MUST ALREADY EXIST. Mutation moves traits slowly; if
+    selection is strong and the initial population is uniform, everything
+    dies before anything adapts. Seed a spread of traits at init.
+
+INHERITANCE — and the silent bug from Level 1 returns:
+
+    key, sub = jax.random.split(key)
+    child = jnp.clip(parent + jax.random.normal(sub, ()) * MUT_SD, 0.0, MAX)
+
+If they reuse one key, EVERY offspring in a generation gets the identical
+mutation. Code runs, evolution is silently wrong. Ask them how they would
+detect that from a plot.
+
+CHECKPOINT — THE TWO-DIRECTIONAL TEST. Sparse scattered food should make mean
+vision RISE. Dense uniform food (vision nearly useless) should make it FALL
+back toward the cost-minimising value. Both directions, no agent involved.
+One direction alone does not distinguish selection from unrelated drift.
+
+
+================================================================================
+LEVEL 8 — POISON                                                     [TODO]
+================================================================================
+
+GOAL: a selection pressure the future agent can aim.
+
+In this repo poison selects for VISION: ducks that see far enough detect and
+avoid poisoned tiles; short-sighted ones wander in. Strength is 0-5.
+
+DESIGN QUESTIONS (theirs to decide, but make them decide deliberately):
+  - Hard detection threshold, or a probability? Probability is smoother,
+    which helps learning later.
+  - Does stronger poison become EASIER to detect (more pungent) or harder
+    (more lethal at the margin)? Both defensible, different pressure.
+  - Does avoiding poison cost something — a wasted move, an energy hit?
+
+THE SANITY CHECK ON THE DESIGN: if the best policy is "never use poison", the
+mechanic is dead weight and half the future action space is wasted. Poison
+must buy something food alone cannot.
+
+THE DYNAMIC THIS CREATES — and it is the reason the domain is interesting:
+poison culls low-vision ducks -> mean vision rises -> poison stops working.
+The agent's control tool degrades as a direct consequence of using it.
+
+CHECKPOINT: mean vision rises faster with poison than without. AND: the same
+poison strength kills a smaller fraction of the population at step 500 than
+at step 50. That second measurement is the headline result of the whole
+environment — verify it before building any RL on top.
+
+
+================================================================================
+LEVEL 9 — BATCH THE WORLDS                                           [TODO]
+================================================================================
+
+GOAL: thousands of worlds in parallel. The systems result.
+
+    step_worlds = jax.jit(jax.vmap(step_world, in_axes=(0, 0, None)))
+
+IF LEVELS 1-8 KEPT THE BATCH AXIS OUT OF step_world, THIS IS NEARLY FREE.
+That is the payoff for the discipline. Where it is NOT free tells them
+exactly where they leaked a batch assumption — a useful diagnostic, so do not
+pre-emptively fix it for them.
+
+    keys   = jax.random.split(key, N_WORLDS)
+    worlds = jax.vmap(init_world)(keys)      # procedural generation
+
+THEN jax.lax.scan — the last purely-JAX hurdle. It runs a whole episode
+inside one compiled kernel instead of a Python loop. The carry/output split
+is genuinely confusing the first time, which is why it gets its own level
+rather than arriving alongside PPO.
+
+MEASUREMENTS TO TAKE (these are resume numbers):
+  - steps/sec, and the N_WORLDS at which it stops improving. Plot it.
+  - jit around step vs around a whole episode. Time both.
+
+CHECKPOINT: same seed gives identical results across runs; different seeds
+differ. Sounds trivial; it is the test that catches key-threading bugs, which
+are otherwise invisible.
+
+
+================================================================================
+LEVEL 10 — THE RL AGENT                                              [TODO]
+================================================================================
+
+GOAL: PPO from scratch. The environment is the hard part and it is done.
+
+THE ACTION SPACE (this repo's choice): food region (0-15), food rate (0-3),
+poison region (0-15), poison strength (0-5). Regions are a coarse 4x4 over
+the grid — small and discrete, which matters for both learnability and
+debugging.
+
+OBJECTIVE: keep the population inside a target band. Reward for in-band,
+minus intervention cost.
+
+OBSERVATION: AGGREGATES ONLY — population count, mean energy, recent growth
+rate, coarse food/poison density per region. NOT the per-duck arrays, NOT the
+trait distribution. Partial observability is a design requirement, not an
+oversight.
+
+BASELINES FIRST, BEFORE ANY POLICY. Do-nothing, random actions, and a
+scripted threshold controller ("spawn food below the band, poison above it").
+The scripted one is the bar a learned policy has to clear. Retrofitting
+baselines is how projects stall.
+
+A STRONG SUGGESTION: have them do PPO on CartPole FIRST, in a scratch file.
+CartPole is solved — reward 500 means it works, anything else means a bug.
+This environment gives no such signal, so it is the wrong place to write a
+first PPO.
+
+WATCH FOR REWARD HACKING. It is likely, and it is the most valuable output:
+collapsing the population to a tiny "stable" number, exploiting a boundary
+condition, oscillating across the band edge to farm reward. When it happens:
+document it, show the trace, fix the reward, re-run. Encourage the human to
+KEEP those runs rather than deleting them.
+
+
+================================================================================
+MAINTAINING THIS FILE
+================================================================================
+
+After coaching someone through a level, update it:
+
+  - Add bugs they hit that are not listed. Real bugs are the curriculum, and
+    the ones that produce NO error message are the most valuable to record.
+  - Note where your explanation did not land the first time, and what did
+    work.
+  - Keep levels ordered by which single new difficulty they introduce.
+  - Do not add solutions. If a level starts containing working code the human
+    could copy, it has failed.
+  - Be honest about gaps (see the divide-by-zero note in Level 4). A known
+    limitation is worth more than a false claim of completeness.

@@ -2,10 +2,10 @@ import jax, jax.numpy as jnp
 from typing import NamedTuple
 
 # keep small for initial testing
-MAX_POPULATION = 5
-INITIAL_POPULATION = 2
+MAX_POPULATION = 64
+INITIAL_POPULATION = 16
 GRID_SIZE = 10
-SIMULATION_STEPS = 3
+SIMULATION_STEPS = 1000
 
 class World(NamedTuple):
     food: jax.Array #(X, Y) int
@@ -34,6 +34,16 @@ class Creatures(NamedTuple):
         rows = self.pos[:, 0]
         cols = self.pos[:, 1]
         return jnp.zeros((GRID_SIZE, GRID_SIZE)).at[rows, cols].add(is_alive)
+
+    def per_position_breedable_count(self) -> jax.Array:
+        can_breed = self.alive & (self.energy >= 4)
+        rows = self.pos[:, 0]
+        cols = self.pos[:, 1]
+        return jnp.zeros((GRID_SIZE, GRID_SIZE)).at[rows, cols].add(can_breed)
+
+    # Returns the position grid flattened
+    def flat_pos(self):
+      return self.pos[:, 0] * GRID_SIZE + self.pos[:, 1]
 
 
 # Single move step of all creatures
@@ -85,6 +95,63 @@ def zero_eaten_food(world: World, per_grid_count: jax.Array) -> tuple[World]:
     new_food = jnp.where(per_grid_count > 0, 0, world.food)
     new_world = World(new_food)
     return new_world
+
+# Returns a rank to breed amongst ducks on the same tile
+# Used to pair off ducks for breeding
+# return (MAX_POPULATION, ) int - rank or -1 if ineligible
+def compute_breed_rank(creature: Creatures) -> jax.Array:
+    # Minimum 4 energy so parent is always left with atleast 2 energy after breeding
+    # (MAX_CREATURES, bool)
+    can_breed = creature.alive & (creature.energy >= 4)
+
+    # (MAX_CREATURES, int)
+    flattened_pos = creature.flat_pos()
+
+    # Build a matrix of if duck i is on the same tile as duck j using their flattened positions
+    # flattened_pos[:, None] is all value stretched across the columns
+    # flattened_pos[None, :] is all values stretched across the row
+    # i,i = true for all i
+    same_tile = flattened_pos[:, None] == flattened_pos[None, :]
+
+    # Construct an index per duck
+    idx = jnp.arange(MAX_POPULATION)
+    earlier = idx[:, None] > idx[None, :]
+
+    combined_conditions =  same_tile & earlier & can_breed[None, :]
+    # raw rank for an individual duck. Counts eligible ducks on my tile with a
+    # lower slot index. Ineligible ducks still get a count here -- the
+    # expression never asked whether *I* can breed -- so mask them to -1.
+    rank_raw = combined_conditions.sum(axis=1)
+
+    # Set ineligble to rank -1 for ease later on
+    return jnp.where(can_breed, rank_raw, -1)
+
+# not vmap'd
+def breed(breed_ranks: jax.Array, creature: Creatures) -> tuple[Creatures]:
+
+
+    # # Breeding is possible if rank >= 0 & there is another eligble duck with rank >0 on this tile
+    # on_my_grid = creature.per_position_breedable_count()[creature.pos[0], creature.pos[1]]
+
+    # # If there are other ducks here, this duck has a breed rank, then partition by odd and even indices
+    # can_breed = jnp.where((breed_ranks >= 0) & (breed_ranks % 2 == 0) & (on_my_grid > 0), 
+    #           on_my_grid >= breed_ranks + 1, # index 0, 2, etc - check there is a duck index 1, 3, etc
+    #           on_my_grid <= breed_ranks - 1) # otherwise needs to check index before
+
+    # Simpler not using vmap approach
+
+    # Compute the same tile matrix
+    flattened_pos = creature.flat_pos()
+    same_tile = flattened_pos[:, None] == flattened_pos[None, :]
+
+    # 
+
+
+
+    
+
+
+    return creature
 
 # Vmap functions
 step_all = jax.vmap(step, in_axes=(None, 0, 0))
