@@ -2,9 +2,9 @@ import jax, jax.numpy as jnp
 from typing import NamedTuple
 
 # keep small for initial testing
-MAX_POPULATION = 64
+MAX_POPULATION = 256
 INITIAL_POPULATION = 16
-GRID_SIZE = 10
+GRID_SIZE = 100
 SIMULATION_STEPS = 1000
 # Min energy to breed. A parent pays energy/2 + 1, so at the threshold it keeps 1.
 BREED_ENERGY = 4.0

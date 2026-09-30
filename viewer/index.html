@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Foragers World — Trajectory Viewer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #faf9f7;
+    --panel: #ffffff;
+    --ink: #1a1a1a;
+    --muted: #6b6b6b;
+    --line: #e2e0dc;
+    --accent: #2563eb;
+    --food: #7cb342;
+    --forager: #d94f3d;
+    --grid-line: #eceae6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17181a;
+      --panel: #1f2023;
+      --ink: #eceaea;
+      --muted: #9a9a9a;
+      --line: #32343a;
+      --accent: #5b8ef5;
+      --food: #8fc94f;
+      --forager: #f0705c;
+      --grid-line: #2a2c31;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px 16px 40px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+
+  header { margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; }
+
+  .loader {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; margin-bottom: 18px;
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  }
+  .loader label {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 13px; border: 1px solid var(--line); border-radius: 7px;
+    cursor: pointer; font-weight: 500; background: var(--bg);
+  }
+  .loader label:hover { border-color: var(--accent); }
+  .loader input[type=file] { display: none; }
+  .hint { color: var(--muted); font-size: 12.5px; }
+  .drop-active { outline: 2px dashed var(--accent); outline-offset: 3px; }
+
+  .cols { display: grid; grid-template-columns: minmax(0,1fr) 280px; gap: 18px; align-items: start; }
+  @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px;
+  }
+  .panel h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600;
+  }
+
+  canvas { display: block; width: 100%; height: auto; border-radius: 6px; }
+  #grid { image-rendering: pixelated; }
+
+  .controls { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-weight: 500; padding: 7px 14px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+  .step-label { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 92px; font-size: 13px; }
+  select { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--bg); color: var(--ink); }
+
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line);
+           border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .stat { background: var(--panel); padding: 11px 13px; }
+  .stat .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .stat .v { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+  .legend { display: flex; gap: 14px; margin-top: 12px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+
+  dl.meta { margin: 0; font-size: 12.5px; }
+  dl.meta div { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0;
+                border-bottom: 1px solid var(--line); }
+  dl.meta div:last-child { border-bottom: 0; }
+  dl.meta dt { color: var(--muted); margin: 0; }
+  dl.meta dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
+
+  #empty { text-align: center; padding: 48px 20px; color: var(--muted); }
+  #empty code { background: var(--bg); padding: 2px 6px; border-radius: 4px;
+                border: 1px solid var(--line); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Foragers World — Trajectory Viewer</h1>
+  <div class="sub">Replay a recorded simulation run. Food is green, foragers are dots sized by energy.</div>
+</header>
+
+<div class="loader" id="loader">
+  <label>
+    <input type="file" id="file" accept=".json,application/json">
+    Load trajectory JSON
+  </label>
+  <select id="preset">
+    <option value="">— or pick a run from runs/ —</option>
+  </select>
+  <span class="hint" id="hint">or drop a file anywhere on this page</span>
+</div>
+
+<div id="empty" class="panel">
+  <p>No trajectory loaded.</p>
+  <p>Generate one with<br><code>.venv/bin/python src/foragers_world_rl/record_run.py</code></p>
+  <p class="hint">Bundled runs need this page served over http, not opened as a file:<br>
+     <code>python3 -m http.server</code> then visit <code>localhost:8000/viewer/</code></p>
+</div>
+
+<div id="app" hidden>
+  <div class="cols">
+    <div>
+      <div class="panel">
+        <h2>World</h2>
+        <canvas id="grid" width="640" height="640"></canvas>
+        <div class="controls">
+          <button id="play" class="primary">Play</button>
+          <button id="back">←</button>
+          <button id="fwd">→</button>
+          <input type="range" id="scrub" min="0" value="0">
+          <span class="step-label" id="steplabel">step 0 / 0</span>
+          <select id="speed">
+            <option value="480">0.5×</option>
+            <option value="240" selected>1×</option>
+            <option value="120">2×</option>
+            <option value="60">4×</option>
+          </select>
+        </div>
+        <div class="legend">
+          <span><i class="swatch" style="background:var(--food)"></i> food (darker = more)</span>
+          <span><i class="dot" style="background:var(--forager)"></i> forager (bigger = more energy)</span>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:18px">
+        <h2>Population &amp; food over time</h2>
+        <canvas id="chart" width="900" height="220"></canvas>
+        <div class="legend">
+          <span><i class="swatch" style="background:var(--forager)"></i> population</span>
+          <span><i class="swatch" style="background:var(--food)"></i> total food</span>
+          <span><i class="swatch" style="background:var(--accent)"></i> current step</span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>This step</h2>
+        <div class="stats">
+          <div class="stat"><div class="k">Population</div><div class="v" id="s-pop">—</div></div>
+          <div class="stat"><div class="k">Mean energy</div><div class="v" id="s-energy">—</div></div>
+          <div class="stat"><div class="k">Total food</div><div class="v" id="s-food">—</div></div>
+          <div class="stat"><div class="k">Step</div><div class="v" id="s-step">—</div></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:18px">
+        <h2>Run</h2>
+        <dl class="meta" id="meta"></dl>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let data = null, frame = 0, playing = false, timer = null;
+
+// ---------- loading ----------------------------------------------------------
+// Food is delta-encoded: frame 0 has a full `food` grid, later frames only carry
+// `food_delta` ([row, col, value] triples). Scrubbing needs random access, so
+// rebuild every frame's full grid once up front rather than replaying deltas on
+// each draw.
+function expandFood(d) {
+  let cur = null;
+  for (const f of d.frames) {
+    if (f.food) {
+      cur = f.food.map(row => row.slice());
+    } else if (f.food_delta && cur) {
+      cur = cur.map(row => row.slice());
+      for (const [r, c, v] of f.food_delta) cur[r][c] = v;
+      f.food = cur;
+    } else if (!f.food) {
+      // No full grid seen yet and no delta to apply: fall back to empty.
+      cur = Array.from({length: d.grid_size}, () => new Array(d.grid_size).fill(0));
+      f.food = cur;
+    }
+  }
+}
+
+function load(json, name) {
+  if (!json || !Array.isArray(json.frames) || !json.frames.length) {
+    alert("That file has no frames. Expected a foragers-world-rl trajectory.");
+    return;
+  }
+  data = json;
+  expandFood(data);
+  frame = 0;
+  $("empty").hidden = true;
+  $("app").hidden = false;
+  $("scrub").max = data.frames.length - 1;
+  $("scrub").value = 0;
+  if (name) $("hint").textContent = name;
+  renderMeta();
+  drawChart();
+  render();
+}
+
+$("file").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { try { load(JSON.parse(r.result), f.name); }
+                     catch (err) { alert("Could not parse JSON: " + err.message); } };
+  r.readAsText(f);
+});
+
+// Populate the dropdown from whatever is actually in runs/, rather than a
+// hardcoded list that goes stale every time you record something. Python's
+// http.server returns an HTML directory listing, so scrape the .json links out
+// of it. Fails quietly when opened as a file:// page -- the file picker and
+// drag-and-drop still work.
+async function findRuns() {
+  const sel = $("preset");
+  try {
+    const res = await fetch("../runs/");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+    const names = [...doc.querySelectorAll("a")]
+      .map(a => a.getAttribute("href"))
+      .filter(h => h && h.toLowerCase().endsWith(".json"))
+      .map(h => h.split("/").pop())
+      .sort();
+    if (!names.length) {
+      sel.options[0].textContent = "— no .json files in runs/ —";
+      return;
+    }
+    for (const n of names) {
+      const o = document.createElement("option");
+      o.value = "../runs/" + n;
+      o.textContent = n;
+      sel.appendChild(o);
+    }
+    sel.options[0].textContent = `— pick a run from runs/ (${names.length}) —`;
+  } catch {
+    sel.options[0].textContent = "— serve over http to list runs/ —";
+  }
+}
+findRuns();
+
+$("preset").addEventListener("change", async e => {
+  if (!e.target.value) return;
+  try {
+    const res = await fetch(e.target.value);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    load(await res.json(), e.target.value);
+  } catch (err) {
+    alert("Could not fetch " + e.target.value + "\n" + err.message +
+          "\n\nBundled runs need this page served over http. Try:\n  python3 -m http.server");
+  }
+});
+
+// drag and drop
+document.addEventListener("dragover", e => { e.preventDefault(); $("loader").classList.add("drop-active"); });
+document.addEventListener("dragleave", () => $("loader").classList.remove("drop-active"));
+document.addEventListener("drop", e => {
+  e.preventDefault();
+  $("loader").classList.remove("drop-active");
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { try { load(JSON.parse(r.result), f.name); }
+                     catch (err) { alert("Could not parse JSON: " + err.message); } };
+  r.readAsText(f);
+});
+
+// ---------- rendering --------------------------------------------------------
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function render() {
+  const f = data.frames[frame];
+  const n = data.grid_size;
+  const cv = $("grid"), ctx = cv.getContext("2d");
+  const px = cv.width / n;
+
+  // Food layer. Alpha scales with amount relative to the run's max.
+  ctx.fillStyle = css("--panel");
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  // Plain loops, not Math.max(...spread): a 100x100 grid over many frames is
+  // hundreds of thousands of values, and spreading that many arguments blows
+  // the call stack.
+  const maxFood = data._maxFood ?? (data._maxFood = (() => {
+    let m = 1;
+    for (const fr of data.frames)
+      for (const row of fr.food)
+        for (const v of row) if (v > m) m = v;
+    return m;
+  })());
+  const foodCol = css("--food");
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const v = f.food[r][c];
+      if (v <= 0) continue;
+      ctx.globalAlpha = 0.18 + 0.82 * (v / maxFood);
+      ctx.fillStyle = foodCol;
+      ctx.fillRect(c * px, r * px, px, px);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Grid lines
+  ctx.strokeStyle = css("--grid-line");
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= n; i++) {
+    ctx.beginPath(); ctx.moveTo(i * px, 0); ctx.lineTo(i * px, cv.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * px); ctx.lineTo(cv.width, i * px); ctx.stroke();
+  }
+
+  // Foragers. Several can share a tile, so fan them out around the centre.
+  const byTile = new Map();
+  for (const a of f.foragers) {
+    const k = a.row + "," + a.col;
+    if (!byTile.has(k)) byTile.set(k, []);
+    byTile.get(k).push(a);
+  }
+  const maxE = data._maxE ?? (data._maxE = (() => {
+    let m = 1;
+    for (const fr of data.frames)
+      for (const a of fr.foragers) if (a.energy > m) m = a.energy;
+    return m;
+  })());
+  ctx.fillStyle = css("--forager");
+  for (const [, group] of byTile) {
+    group.forEach((a, i) => {
+      const cx = (a.col + 0.5) * px, cy = (a.row + 0.5) * px;
+      let ox = 0, oy = 0;
+      if (group.length > 1) {
+        const ang = (i / group.length) * Math.PI * 2;
+        const rad = px * 0.22;
+        ox = Math.cos(ang) * rad; oy = Math.sin(ang) * rad;
+      }
+      const rr = px * (0.11 + 0.20 * Math.min(1, a.energy / maxE));
+      ctx.beginPath();
+      ctx.arc(cx + ox, cy + oy, Math.max(1.5, rr), 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  $("s-pop").textContent = f.population;
+  $("s-energy").textContent = f.mean_energy.toFixed(2);
+  $("s-food").textContent = f.total_food.toFixed(1);
+  $("s-step").textContent = f.step;
+  $("steplabel").textContent = `step ${frame} / ${data.frames.length - 1}`;
+  $("scrub").value = frame;
+  $("back").disabled = frame === 0;
+  $("fwd").disabled = frame === data.frames.length - 1;
+  drawChart();
+}
+
+function drawChart() {
+  const cv = $("chart"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, pad = 26;
+  ctx.clearRect(0, 0, W, H);
+
+  const pops = data.frames.map(f => f.population);
+  const foods = data.frames.map(f => f.total_food);
+  // reduce, not spread: a long run has one value per frame and spreading
+  // thousands of arguments risks a stack overflow.
+  const maxPop = pops.reduce((a, b) => (b > a ? b : a), 1);
+  const maxFood = foods.reduce((a, b) => (b > a ? b : a), 1);
+  const x = i => pad + (i / Math.max(1, data.frames.length - 1)) * (W - pad * 2);
+
+  // axes
+  ctx.strokeStyle = css("--line"); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad, H - pad); ctx.lineTo(W - pad, H - pad); ctx.stroke();
+
+  const line = (vals, max, col) => {
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath();
+    vals.forEach((v, i) => {
+      const yy = H - pad - (v / max) * (H - pad * 2);
+      i ? ctx.lineTo(x(i), yy) : ctx.moveTo(x(i), yy);
+    });
+    ctx.stroke();
+  };
+  line(foods, maxFood, css("--food"));
+  line(pops, maxPop, css("--forager"));
+
+  // current step marker
+  ctx.strokeStyle = css("--accent"); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x(frame), pad - 8); ctx.lineTo(x(frame), H - pad); ctx.stroke();
+
+  ctx.fillStyle = css("--muted");
+  ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText(`pop max ${maxPop}`, pad, 13);
+  ctx.fillText(`food max ${maxFood.toFixed(0)}`, pad + 90, 13);
+}
+
+function renderMeta() {
+  const s = data.summary || {}, p = data.params || {};
+  const rows = [
+    ["Label", data.label ?? "—"],
+    ["Grid", `${data.grid_size} × ${data.grid_size}`],
+    ["Max population", data.max_population],
+    ["Steps", s.steps ?? data.frames.length],
+    ["Peak population", s.peak_population ?? "—"],
+    ["Final population", s.final_population ?? "—"],
+    ["Extinct", s.extinct ? "yes" : "no"],
+    ["Seed", p.seed ?? "—"],
+    ["Breed energy", p.breed_energy ?? "—"],
+    ["Food regrowth", p.food_regrowth === undefined ? "—" : (p.food_regrowth ? "yes" : "no")],
+  ];
+  $("meta").innerHTML = rows
+    .map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+}
+
+// ---------- playback ---------------------------------------------------------
+function stop() {
+  playing = false; clearInterval(timer); timer = null; $("play").textContent = "Play";
+}
+function play() {
+  if (frame >= data.frames.length - 1) frame = 0;
+  playing = true; $("play").textContent = "Pause";
+  clearInterval(timer);
+  timer = setInterval(() => {
+    if (frame >= data.frames.length - 1) { stop(); return; }
+    frame++; render();
+  }, Number($("speed").value));
+}
+$("play").addEventListener("click", () => (playing ? stop() : play()));
+$("back").addEventListener("click", () => { stop(); if (frame > 0) { frame--; render(); } });
+$("fwd").addEventListener("click", () => {
+  stop(); if (frame < data.frames.length - 1) { frame++; render(); }
+});
+$("scrub").addEventListener("input", e => { stop(); frame = Number(e.target.value); render(); });
+$("speed").addEventListener("change", () => { if (playing) play(); });
+
+document.addEventListener("keydown", e => {
+  if (!data) return;
+  if (e.key === " ") { e.preventDefault(); playing ? stop() : play(); }
+  if (e.key === "ArrowLeft" && frame > 0) { stop(); frame--; render(); }
+  if (e.key === "ArrowRight" && frame < data.frames.length - 1) { stop(); frame++; render(); }
+});
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (data) render(); });
+</script>
+</body>
+</html>

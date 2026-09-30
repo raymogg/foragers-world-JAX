@@ -9,8 +9,7 @@ population adapts to its interventions, making poison progressively less
 effective.
 
 **Built end-to-end in JAX:** pure functional `step()`, `vmap` over the population
-and over parallel worlds, `jit`-compiled throughout. No Python loops inside the
-simulation.
+and over parallel worlds, `jit`-compiled throughout.
 
 ## Running
 
@@ -18,6 +17,22 @@ simulation.
 .venv/bin/python src/foragers_world_rl/world.py   # run the simulation
 .venv/bin/python tests/test_world.py              # run the test suite
 ```
+
+## Viewing a run
+
+Record a trajectory, then replay it in the browser:
+
+```bash
+PYTHONPATH=src .venv/bin/python src/foragers_world_rl/record_run.py \
+    --steps 200 --seed 0 --out runs/run.json
+
+python3 -m http.server          # then open localhost:8000/viewer/
+```
+
+The viewer is a single static HTML file with no build step. It shows the food
+grid, foragers sized by energy, a population/food chart, and a scrubber — or
+drag any trajectory JSON onto the page. `runs/sample.json` is checked in as an
+example.
 
 ## Current feature set
 

@@ -10,6 +10,25 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "foragers-world-rl"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "jax", specifier = ">=0.6.2" },
+    { name = "numpy", specifier = ">=1.24" },
+]
+
+[[package]]
 name = "jax"
 version = "0.6.2"
 source = { registry = "https://pypi.org/simple" }
@@ -67,19 +86,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/96/c3/cbb70e5e0846891b4
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ca/87/0c0ca8433e1135f6d1acd355cff21f31c3d433d937d6547aa545c8b060b8/jax-0.11.2-py3-none-any.whl", hash = "sha256:59e7ed9bd9ace049f4856752fe580c890e0164e1c023f40fadac386408daad66", size = 3345045, upload-time = "2026-09-17T23:41:14.517Z" },
 ]
-
-[[package]]
-name = "jax-rl-evolutionary"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "jax", specifier = ">=0.6.2" }]
 
 [[package]]
 name = "jaxlib"

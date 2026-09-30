@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import jax
 import jax.numpy as jnp
 
+from foragers_world_rl.recorder import Recorder
 from foragers_world_rl.world import (
     BREED_ENERGY,
     GRID_SIZE,
@@ -113,7 +114,10 @@ def test_energy_conservation():
 
         eaten = food_before - food_after
         gained = energy_after - energy_before
-        assert jnp.allclose(eaten, gained, atol=1e-4), (
+        # rtol, not a tight atol: float32 sums over a GRID_SIZE**2 food grid
+        # accumulate rounding error that scales with the grid, so an absolute
+        # tolerance that passes at 10x10 fails at 100x100 for no real reason.
+        assert jnp.allclose(eaten, gained, rtol=1e-4, atol=1e-3), (
             f"energy gained {gained} != food eaten {eaten}"
         )
 
@@ -396,6 +400,70 @@ def test_breed_dead_forager_energy_is_not_inherited():
     # Slot 1 is free and is free_rank 0, so the child lands there, replacing the
     # stale 99.0. That is the point: a reused slot must be fully reinitialised.
     assert jnp.allclose(out.energy[1], 5.0), "reused slot kept its stale energy"
+def test_recorder_frame_matches_state():
+    """A snapshot records exactly the living foragers and the real food grid.
+
+    The viewer trusts population == len(foragers) and that every coordinate is
+    inside the grid, so pin both.
+    """
+    foragers = _foragers(
+        positions=[[1, 2], [3, 4], [5, 6]],
+        energies=[10.0, 7.5, 3.0],
+        alives=[True, False, True],
+    )
+    world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)).at[1, 2].set(4.0))
+
+    rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION)
+    rec.snapshot(world, foragers)
+    frame = rec.frames[0]
+
+    assert frame["population"] == 2, "dead forager was counted"
+    assert len(frame["foragers"]) == 2, "dead forager was serialised"
+    assert {a["slot"] for a in frame["foragers"]} == {0, 2}
+    assert frame["total_food"] == 4.0
+    # Grid must be grid_size x grid_size, row-major.
+    assert len(frame["food"]) == GRID_SIZE
+    assert all(len(row) == GRID_SIZE for row in frame["food"])
+    assert frame["food"][1][2] == 4.0, "food grid is not row-major [row][col]"
+    # mean_energy over the LIVING only: (10.0 + 3.0) / 2
+    assert abs(frame["mean_energy"] - 6.5) < 1e-6, frame["mean_energy"]
+
+
+def test_recorder_handles_extinction():
+    """Zero living foragers must not divide by zero in mean_energy."""
+    foragers = _foragers(positions=[[0, 0]], energies=[0.0], alives=[False])
+    world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+
+    rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION)
+    rec.snapshot(world, foragers)
+
+    assert rec.frames[0]["population"] == 0
+    assert rec.frames[0]["foragers"] == []
+    assert rec.frames[0]["mean_energy"] == 0.0
+
+
+def test_recorder_round_trips_to_json():
+    """The saved file parses back and keeps the frames. Guards the viewer contract."""
+    import json
+    import tempfile
+
+    foragers = _foragers(positions=[[2, 2]], energies=[8.0], alives=[True])
+    world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)).at[2, 2].set(1.0))
+
+    rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION, label="test")
+    rec.snapshot(world, foragers)
+    rec.snapshot(world, foragers)
+
+    with tempfile.TemporaryDirectory() as d:
+        path = rec.save(Path(d) / "t.json")
+        loaded = json.loads(path.read_text())
+
+    # Keys the viewer reads.
+    for k in ("grid_size", "max_population", "frames", "summary", "params"):
+        assert k in loaded, f"viewer needs top-level key {k!r}"
+    assert loaded["summary"]["steps"] == 2
+    assert loaded["frames"][0]["step"] == 0
+    assert loaded["frames"][1]["step"] == 1, "step numbers must increment"
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

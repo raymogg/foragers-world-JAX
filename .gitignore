@@ -12,3 +12,5 @@ wheels/
 # Building artifacts
 coding_spec.md
 jax_rl_project_spec.md
+
+runs/
