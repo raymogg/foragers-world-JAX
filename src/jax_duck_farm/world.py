@@ -6,6 +6,8 @@ MAX_POPULATION = 64
 INITIAL_POPULATION = 16
 GRID_SIZE = 10
 SIMULATION_STEPS = 1000
+# Min energy to breed. A parent pays energy/2 + 1, so at the threshold it keeps 1.
+BREED_ENERGY = 4.0
 
 class World(NamedTuple):
     food: jax.Array #(X, Y) int
@@ -36,7 +38,7 @@ class Creatures(NamedTuple):
         return jnp.zeros((GRID_SIZE, GRID_SIZE)).at[rows, cols].add(is_alive)
 
     def per_position_breedable_count(self) -> jax.Array:
-        can_breed = self.alive & (self.energy >= 4)
+        can_breed = self.alive & (self.energy >= BREED_ENERGY)
         rows = self.pos[:, 0]
         cols = self.pos[:, 1]
         return jnp.zeros((GRID_SIZE, GRID_SIZE)).at[rows, cols].add(can_breed)
@@ -44,6 +46,11 @@ class Creatures(NamedTuple):
     # Returns the position grid flattened
     def flat_pos(self):
       return self.pos[:, 0] * GRID_SIZE + self.pos[:, 1]
+
+    # Returns the population eligble to breed
+    def can_breed(self):
+        return self.alive & (self.energy >= BREED_ENERGY)
+
 
 
 # Single move step of all creatures
@@ -102,7 +109,7 @@ def zero_eaten_food(world: World, per_grid_count: jax.Array) -> tuple[World]:
 def compute_breed_rank(creature: Creatures) -> jax.Array:
     # Minimum 4 energy so parent is always left with atleast 2 energy after breeding
     # (MAX_CREATURES, bool)
-    can_breed = creature.alive & (creature.energy >= 4)
+    can_breed = creature.can_breed()
 
     # (MAX_CREATURES, int)
     flattened_pos = creature.flat_pos()
@@ -128,30 +135,85 @@ def compute_breed_rank(creature: Creatures) -> jax.Array:
 
 # not vmap'd
 def breed(breed_ranks: jax.Array, creature: Creatures) -> tuple[Creatures]:
-
-
-    # # Breeding is possible if rank >= 0 & there is another eligble duck with rank >0 on this tile
-    # on_my_grid = creature.per_position_breedable_count()[creature.pos[0], creature.pos[1]]
-
-    # # If there are other ducks here, this duck has a breed rank, then partition by odd and even indices
-    # can_breed = jnp.where((breed_ranks >= 0) & (breed_ranks % 2 == 0) & (on_my_grid > 0), 
-    #           on_my_grid >= breed_ranks + 1, # index 0, 2, etc - check there is a duck index 1, 3, etc
-    #           on_my_grid <= breed_ranks - 1) # otherwise needs to check index before
-
-    # Simpler not using vmap approach
-
     # Compute the same tile matrix
     flattened_pos = creature.flat_pos()
+
+    # Breeding requires min 4 energy
+    can_breed = creature.can_breed()
+
+    # This uses new axis to add a column axis and row axis
+    # same tile = (len(flattened_pos), 1) == (1, len(flattened_pos)) broadcasts to (N, N)
+    # same_tile = NxN where i,j = is duck i on same tile as duck j
     same_tile = flattened_pos[:, None] == flattened_pos[None, :]
 
-    # 
+    # partner must be on the same tile AND have the next rank in that tile
+    rank_match = (breed_ranks[None, :] == breed_ranks[:, None] + 1)
 
+    # elementwise and across the two NxN matrices. 
+    is_partner = same_tile & rank_match
 
+    # each row should contain only a single 1 value, argmax returns the index
+    # of that value when run across axis 1
+    partner_id = jnp.argmax(is_partner, axis=1)
+    has_partner = is_partner.any(axis=1)
+    # argmax returns 0 when a row has no match, which is a real duck. Make the
+    # junk explicit so misusing it fails loudly instead of silently pointing at
+    # slot 0.
+    partner_id = jnp.where(has_partner, partner_id, -1)
+    partner_energy = creature.energy[partner_id]
 
-    
+    # --- Stage 1: provisional mothers -----------------------------------------
+    # Cannot include the free-slot capacity check yet: mother_rank is derived
+    # from is_mother, so the gate would be circular. Rank the candidates first.
+    maybe_mother = can_breed & has_partner & (breed_ranks % 2 == 0)
 
+    # Find the free slots in the alive array
+    free = ~creature.alive
+    # how many free slots up to index i exist. Only meaningful where free is True.
+    free_rank = jnp.cumsum(free) - 1
+    # how many candidate mothers up to index i exist
+    mother_rank = jnp.cumsum(maybe_mother) - 1
 
-    return creature
+    # --- Stage 2: final mothers ------------------------------------------------
+    # A mother beyond the number of free slots has nowhere to put a child, so she
+    # must not breed at all -- otherwise she pays the energy for a child that is
+    # never created.
+    is_mother = maybe_mother & (mother_rank < free.sum())
+
+    # partner ID is only valid for mothers - mothers index their partners as they look for rank + 1.
+    # fathers have no index back to mothers.
+    # we compute the deduction of the partners energy using the mothers partner index
+    # we compute the deduction of the mothers energy using their own index
+    mother_energy_cost = jnp.where(is_mother, (creature.energy / 2), 0.0)
+    father_energy_cost = jnp.where(is_mother, ((partner_energy) / 2), 0.0 )
+    # the father's cost is indexed by MOTHER, so scatter it onto the father's slot
+    combined_cost = mother_energy_cost + jnp.zeros(MAX_POPULATION).at[partner_id].add(father_energy_cost)
+    new_energy   = creature.energy - combined_cost
+
+    # Child gets the two halves the parents gave up, so energy is conserved.
+    # Indexed by MOTHER.
+    child_energy = jnp.where(is_mother, (creature.energy + partner_energy) / 2, 0.0)
+
+    # --- Stage 3: place the children ------------------------------------------
+    # gets_child[i, j] = does free slot i take mother j's child?
+    #   free[:, None]        -- slot i must actually be free
+    #   is_mother[None, :]   -- duck j must actually be a mother
+    #   free_rank == mother_rank -- the nth free slot takes the nth mother's child
+    # The first two gates discard the junk values in free_rank/mother_rank.
+    gets_child = free[:, None] & is_mother[None, :] & (free_rank[:, None] == mother_rank[None, :])
+
+    # Reduce along axis 1: per receiving SLOT, which mother fills it?
+    receives = gets_child.any(axis=1)
+    from_mother = jnp.where(receives, jnp.argmax(gets_child, axis=1), -1)
+
+    # Gather the mother's data into the receiving slot, then mask.
+    # receives[:, None] because pos is (MAX_POPULATION, 2) and the mask is (MAX_POPULATION,)
+    new_pos = jnp.where(receives[:, None], creature.pos[from_mother], creature.pos)
+    # Children overwrite the post-cost energy in their own slots only.
+    new_energy = jnp.where(receives, child_energy[from_mother], new_energy)
+    new_alive = creature.alive | receives
+
+    return Creatures(new_pos, new_energy, new_alive)
 
 # Vmap functions
 step_all = jax.vmap(step, in_axes=(None, 0, 0))
