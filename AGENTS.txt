@@ -47,7 +47,7 @@ CALIBRATION: if the human says "don't fully tell me how to solve this" or
 "work with me", they mean it — shift further toward questions. If they say
 "just give me the code", give it, but explain the one idea inside it.
 
-A NOTE ON DOMAIN CHOICE: this repo is a duck farm — ducks forage for food on a
+A NOTE ON DOMAIN CHOICE: this repo is a forager farm — foragers forage for food on a
 grid, breed, and evolve. That is deliberate. An earlier attempt used
 antibiotic resistance in bacteria and it FAILED as a teaching domain: four
 coupled parameters all had to be right before any behaviour appeared at all,
@@ -61,12 +61,13 @@ THE ARC
 --------------------------------------------------------------------------------
 
   Level 0   Break jit on purpose                  -> tracers, jnp.where
-  Level 1   One duck, one step                    -> pure functions, pytrees
-  Level 2   Many ducks, fixed shapes              -> the mask, vmap
-  Level 3   Ducks interact (eating)               -> scatter-add / gather
+  Level 1   One forager, one step                    -> pure functions, pytrees
+  Level 2   Many foragers, fixed shapes              -> the mask, vmap
+  Level 3   Foragers interact (eating)               -> scatter-add / gather
   Level 4   A test suite                          -> properties, not values
   Level 5   Food regrowth                         -> equilibrium        [TODO]
-  Level 6   Breeding                              -> slot allocation    [TODO]
+  Level 6a  Breeding, asexual                     -> slot allocation    [TODO]
+  Level 6b  Breeding, paired                      -> pairwise matching  [TODO]
   Level 7   Heritable traits                      -> evolution          [TODO]
   Level 8   Poison                                -> selection pressure [TODO]
   Level 9   Batch the worlds                      -> scan, steps/sec    [TODO]
@@ -136,7 +137,7 @@ RUN THIS FOR THEM (it is a mechanism demo, not their code):
 
 Point out: the condition was an ARRAY, so where made four independent
 choices. That element-wise behaviour is why it is the workhorse later — one
-call handles every duck.
+call handles every forager.
 
 THE TRAP TO WARN THEM ABOUT: without jit, the `if` works fine. So they can
 write broken code, test it, watch it pass, and only discover the problem
@@ -146,7 +147,7 @@ CHECKPOINT: they can explain why `if` fails and `jnp.where` doesn't.
 
 
 ================================================================================
-LEVEL 1 — ONE DUCK, ONE STEP
+LEVEL 1 — ONE FORAGER, ONE STEP
 ================================================================================
 
 GOAL: pure functional state. No population, no breeding, no evolution.
@@ -162,7 +163,7 @@ ESTABLISH THE GROUND RULES FIRST. These hold for the whole project:
 
 IF THEY ARRIVE WITH A CLASS: they will. Almost everyone writes
 
-    class Duck:
+    class Forager:
         def __init__(self):
             self.energy = 0.0
 
@@ -173,7 +174,7 @@ THEN give them the replacement: an immutable NamedTuple plus free functions.
     class World(NamedTuple):
         food: jax.Array      # (GRID, GRID) float
 
-    class Ducks(NamedTuple):
+    class Foragers(NamedTuple):
         pos: jax.Array       # (2,) int
         energy: jax.Array    # () float
 
@@ -232,20 +233,20 @@ ALSO WARN: `jax.debug.print` takes a format string, NOT an f-string.
     jax.debug.print("energy {}", e)     # correct
     jax.debug.print(f"energy {e}")      # prints a tracer once, then silence
 
-CHECKPOINT: 50 steps with random actions. Energy declines when the duck
+CHECKPOINT: 50 steps with random actions. Energy declines when the forager
 misses food, jumps when it eats. Their first property assertion: total food
 in the world never INCREASES (nothing spawns yet). That one catches an
 `.at[].set()` written backwards.
 
 
 ================================================================================
-LEVEL 2 — MANY DUCKS, FIXED SHAPES
+LEVEL 2 — MANY FORAGERS, FIXED SHAPES
 ================================================================================
 
 GOAL: the mask pattern, and vmap. This is the conceptual hump of the whole
 project. Expect to spend real time here.
 
-FRAME THE PROBLEM BEFORE THE SOLUTION. Ask: "ducks need to die and breed, so
+FRAME THE PROBLEM BEFORE THE SOLUTION. Ask: "foragers need to die and breed, so
 the population changes. But arrays inside jit have fixed shapes. You cannot
 append. What do you do?"
 
@@ -253,15 +254,15 @@ Let them sit with it. Then give the pattern:
 
     MAX_POPULATION = 64
 
-    class Ducks(NamedTuple):
+    class Foragers(NamedTuple):
         pos: jax.Array      # (2,) solo | (MAX_POP, 2) batched
         energy: jax.Array   # ()   solo | (MAX_POP,)   batched
         alive: jax.Array    # ()   solo | (MAX_POP,)   batched
 
 THE MENTAL MODEL THAT MATTERS — state it explicitly, they will get this wrong:
 
-  It is NOT "3 ducks in a 64-slot array".
-  It is 64 ducks, of which 3 count.
+  It is NOT "3 foragers in a 64-slot array".
+  It is 64 foragers, of which 3 count.
 
 Every slot gets REAL values. Every operation runs on all 64. The mask is the
 only thing distinguishing alive from dead. Dead slots are computed anyway and
@@ -296,17 +297,17 @@ divisor.
 
 VMAP — THE BIG MISCONCEPTION. They will ask some version of:
 
-  "I thought vmap automatically maps from Duck to Ducks?"
+  "I thought vmap automatically maps from Forager to Foragers?"
 
 IT DOES NOT. vmap does not map between two classes. It maps over an AXIS of
 arrays. There is no singular type and plural type. The CLASS IS THE SAME at
-both ranks; only the shapes differ. If they have written both a `Duck` and a
-`Ducks` class, have them delete one.
+both ranks; only the shapes differ. If they have written both a `Forager` and a
+`Foragers` class, have them delete one.
 
     step_all = jax.vmap(step, in_axes=(None, 0, 0))
     #                                   ^     ^  ^
-    #                           world shared  |  one key per duck
-    #                                      Ducks, mapped over axis 0
+    #                           world shared  |  one key per forager
+    #                                      Foragers, mapped over axis 0
 
 in_axes, per argument: 0 = "give each call one slice", None = "give every
 call the whole thing".
@@ -324,7 +325,7 @@ is SILENT:
     wrong   = read_food(food, batch)                               # [51. 51.]
 
 No error. With pos = (3,2), `pos[0]` is `[5,5]` and `pos[1]` is `[1,1]`, so
-it fancy-indexes and returns two values for three ducks. THAT is why you
+it fancy-indexes and returns two values for three foragers. THAT is why you
 write for one and vmap.
 
 FOUR BUGS TO EXPECT IN THIS LEVEL. Let them happen; name them when they do.
@@ -332,9 +333,9 @@ FOUR BUGS TO EXPECT IN THIS LEVEL. Let them happen; name them when they do.
   (a) THE MACHINE-FREEZER. The worst bug in the project. If `step` returns
       the world from inside the vmap:
 
-          return world, new_duck          # world is in_axes=None input!
+          return world, new_forager          # world is in_axes=None input!
 
-      then each of N ducks returns its own copy and vmap STACKS them. The
+      then each of N foragers returns its own copy and vmap STACKS them. The
       food array grows an axis per iteration:
 
           (10,10) -> (5,10,10) -> (5,5,10,10) -> (5,5,5,10,10) -> ...
@@ -351,17 +352,17 @@ FOUR BUGS TO EXPECT IN THIS LEVEL. Let them happen; name them when they do.
       them. Fix: `jax.random.split(step_key, MAX_POPULATION)`.
 
   (c) Mixed singular/plural INSIDE the step function. They will write
-      `ducks.alive` (plural, batch thinking) on one line and `duck.pos`
+      `foragers.alive` (plural, batch thinking) on one line and `forager.pos`
       (singular) on the next. Tell them to name the parameter singular — the
       plural name invites batch thinking.
 
-  (d) Immortality. If energy only decreases when the duck MOVES, a duck below
+  (d) Immortality. If energy only decreases when the forager MOVES, a forager below
       the move threshold stops losing energy and lives forever. Ask them to
       separate upkeep (paid always) from move cost (paid when moving).
 
 DEATH IS A BOOLEAN FLIP:
 
-    new_alive = duck.alive & (new_energy > 0.0)
+    new_alive = forager.alive & (new_energy > 0.0)
 
 Nothing is removed or compacted. Counterintuitive coming from OOP — say so.
 Also: base it on the NEW energy, and make sure they actually RETURN it. A
@@ -370,7 +371,7 @@ through.
 
 DEBUGGING HABIT TO TEACH NOW:
 
-    print(jax.tree.map(lambda a: a.shape, ducks))
+    print(jax.tree.map(lambda a: a.shape, foragers))
 
 Every field's shape in one line. When a vmap error appears, this first.
 
@@ -379,52 +380,52 @@ it ever rises, the mask is wrong.
 
 
 ================================================================================
-LEVEL 3 — DUCKS INTERACT (EATING)
+LEVEL 3 — FORAGERS INTERACT (EATING)
 ================================================================================
 
 GOAL: scatter-add and gather. The single most valuable idiom in vectorised
 simulation. Do not shortcut this level.
 
-SET UP THE PROBLEM: "Two ducks on the same tile. vmap runs them
+SET UP THE PROBLEM: "Two foragers on the same tile. vmap runs them
 independently, so both see the full food and both eat it. Food gets
 duplicated. Fix it."
 
 LET THEM PROPOSE AN APPROACH FIRST. The most common proposal is a good one
 and deserves credit:
 
-  "Write an eat function for a single TILE — find all ducks on it, divide the
+  "Write an eat function for a single TILE — find all foragers on it, divide the
    food, distribute — then vmap over tiles."
 
 Tell them the reasoning is sound (interaction cannot live inside the
-per-duck vmap; it should still be batched). Then push on it with two
+per-forager vmap; it should still be batched). Then push on it with two
 questions:
 
-  1. How many tiles vs how many ducks? A 64x64 grid is 4096 tiles, nearly all
-     empty, for 256 ducks. Which way does the ratio go as it scales?
+  1. How many tiles vs how many foragers? A 64x64 grid is 4096 tiles, nearly all
+     empty, for 256 foragers. Which way does the ratio go as it scales?
   2. THE REAL BLOCKER: what does the per-tile function RETURN? It needs to
-     give energy to specific ducks, but under vmap-over-tiles each call
-     returns something per-TILE. They would return a (n_tiles, n_ducks)
+     give energy to specific foragers, but under vmap-over-tiles each call
+     returns something per-TILE. They would return a (n_tiles, n_foragers)
      thing and sum it — a matrix in disguise, doing far more work than
      needed.
 
-THEN FLIP IT FOR THEM: "you framed it as 'for each tile, find its ducks'.
-Try 'for each duck, what does it need to know?'"
+THEN FLIP IT FOR THEM: "you framed it as 'for each tile, find its foragers'.
+Try 'for each forager, what does it need to know?'"
 
-A duck needs: how much food is at its position (it already has this), and how
-many ducks share its position. Given both, the share is obvious. So the whole
+A forager needs: how much food is at its position (it already has this), and how
+many foragers share its position. Given both, the share is obvious. So the whole
 problem reduces to ONE question:
 
-    How does each duck find out how many ducks share its tile?
+    How does each forager find out how many foragers share its tile?
 
 GIVE THEM THE PRIMITIVE, NOT THE FUNCTION:
 
     jnp.zeros((GRID, GRID)).at[rows, cols].add(1.0)
 
 Let them work out what it does. When they ask what rows and cols are — they
-will — the answer is that they are ARRAYS, one entry per duck:
+will — the answer is that they are ARRAYS, one entry per forager:
 
-    rows = ducks.pos[:, 0]    # (MAX_POP,) every duck's row
-    cols = ducks.pos[:, 1]    # (MAX_POP,) every duck's col
+    rows = foragers.pos[:, 0]    # (MAX_POP,) every forager's row
+    cols = foragers.pos[:, 1]    # (MAX_POP,) every forager's col
 
 Read as PAIRS position by position. `.at[rows, cols].add(1.0)` writes to all
 of those coordinates at once, and DUPLICATES ACCUMULATE. That is the trick.
@@ -441,12 +442,12 @@ fancy-indexing bug from Level 2.
 
 ALSO CONTRAST pos[:, 0] WITH pos[0]. Both appear in their code and mean
 different things at different ranks — `pos[0]` inside a vmap is "my row",
-outside it is "duck 0's position".
+outside it is "forager 0's position".
 
-THE DEAD-DUCK MASK. Ask: "dead slots are in that array too. How do you stop
+THE DEAD-FORAGER MASK. Ask: "dead slots are in that array too. How do you stop
 them claiming a share? You cannot skip them — fixed shapes."
 
-    contribution = ducks.alive.astype(float)     # 1.0 alive, 0.0 dead
+    contribution = foragers.alive.astype(float)     # 1.0 alive, 0.0 dead
     counts = jnp.zeros((GRID, GRID)).at[rows, cols].add(contribution)
 
 Adding zero is how you skip something when you cannot skip it. Same idea as
@@ -457,14 +458,14 @@ THEN THE GATHER — the half that completes it:
     my_count = counts[rows, cols]     # same indices, READ instead of write
 
 SCATTER TO AGGREGATE, GATHER TO DISTRIBUTE. Say it in those words. It comes
-back for poison, for breeding, for every duck-to-duck interaction.
+back for poison, for breeding, for every forager-to-forager interaction.
 
 WHY .add() AND NOT .set(): demonstrate it. `.set(1.0)` gives every occupied
-tile a count of 1 regardless of how many ducks are on it, silently breaking
+tile a count of 1 regardless of how many foragers are on it, silently breaking
 the division.
 
 THE STRUCTURAL CONSEQUENCE — make them derive this. Ask: "the count grid
-needs every duck's NEW position. When can you compute it?" They should reach:
+needs every forager's NEW position. When can you compute it?" They should reach:
 
     1. move everyone          (vmap  — independent)
     2. build the count grid   (outside — needs all positions)
@@ -476,8 +477,8 @@ This question designs the shape of `step` for the rest of the project.
 
 A NICE INSIGHT TO WATCH FOR. If they say "food consumption is a one-liner —
 just zero every occupied tile", they are RIGHT, and tell them why: because
-eating is exhaustive, every duck on a tile splits all of it, so the tile is
-always emptied. No per-duck bookkeeping.
+eating is exhaustive, every forager on a tile splits all of it, so the tile is
+always emptied. No per-forager bookkeeping.
 
     occupied = counts > 0
     new_food = jnp.where(occupied, 0.0, world.food)
@@ -487,7 +488,7 @@ thing and using it twice is the tell that a design is right. But name the
 assumption: food is now all-or-nothing. A per-step eating RATE would need a
 scatter-subtract instead.
 
-THE DIVIDE-BY-ZERO: a dead duck alone on a tile reads count 0.0. Guard the
+THE DIVIDE-BY-ZERO: a dead forager alone on a tile reads count 0.0. Guard the
 DENOMINATOR (`jnp.maximum(count, 1.0)`), not the result. Worth noting the
 honest nuance: division by zero gives inf, not nan, and a surrounding where
 does mask it — but nan gradients in the backward pass are a real problem
@@ -499,12 +500,12 @@ CHECKPOINT — TWO THINGS, AND THE SECOND IS USUALLY MISSED:
      world, every step. Have them print both. This one check validates the
      entire scatter/gather/decrement chain.
 
-  2. SHARING IS PROBABLY UNTESTED. With a few ducks on a 10x10 grid they
+  2. SHARING IS PROBABLY UNTESTED. With a few foragers on a 10x10 grid they
      never collide, so the branch they just designed has never run. Have them
-     rig it: several ducks forced onto one tile, ONE OF THEM DEAD, known food
+     rig it: several foragers forced onto one tile, ONE OF THEM DEAD, known food
      amount. The dead one is the point — if the alive mask is wrong it
      inflates the divisor and each sharer gets too little. A test that only
-     uses living ducks misses it.
+     uses living foragers misses it.
 
 
 ================================================================================
@@ -524,7 +525,7 @@ change and only fails when the mechanics actually break.
 
 THE PROPERTIES WORTH ASSERTING (this repo's suite, as a starting point):
 
-  - food shared evenly, with a DEAD duck on the shared tile
+  - food shared evenly, with a DEAD forager on the shared tile
   - energy conservation: gained by living == removed from world
   - population only declines when there is no food
   - positions never leave the grid
@@ -552,12 +553,12 @@ first. Breaks worth trying:
 
     .add() -> .set() in the count       should fail conservation + sharing
     remove the alive mask from count    should fail conservation + sharing
-    new_alive = duck.alive              should fail population-declines
+    new_alive = forager.alive              should fail population-declines
     remove the divide-by-zero guard     (may still pass — see below)
 
 BE HONEST WHEN A TEST DOES NOT CATCH SOMETHING. In this repo, removing the
 divide-by-zero guard still passed 8/8, because the food is zeroed before a
-dead duck can hit a zero-count tile with food on it. Tell the human that is a
+dead forager can hit a zero-count tile with food on it. Tell the human that is a
 gap, that the guard is protecting against a case the current step ORDER
 happens to avoid, and that reordering could expose it. A test suite whose
 limits are known is worth more than one assumed to be complete.
@@ -578,7 +579,7 @@ regrowth and a FIXED population they tune one thing until mean energy is
 roughly flat — a baseline they understand.
 
 THE TELL THEY NEED IT: mean energy trending up every step (e.g. 10.0 -> 10.5
--> 11.0) means food income exceeds movement cost, so ducks grow without
+-> 11.0) means food income exceeds movement cost, so foragers grow without
 limit until the world is stripped.
 
 QUESTIONS FOR THEM:
@@ -590,7 +591,7 @@ QUESTIONS FOR THEM:
   - Rate as probability per cell, or a fixed number of cells per step?
 
 Also have them raise MAX_POPULATION to ~64 and GRID_SIZE to ~20 here. Five
-slots and two ducks cannot show population dynamics.
+slots and two foragers cannot show population dynamics.
 
 CHECKPOINT: mean energy hovers rather than trending. No new JAX concepts in
 this level — it is all things from Levels 1-3.
@@ -599,42 +600,187 @@ this level — it is all things from Levels 1-3.
 
 
 ================================================================================
-LEVEL 6 — BREEDING                                                   [TODO]
+LEVEL 6a — BREEDING, ASEXUAL                                         [TODO]
 ================================================================================
 
-GOAL: population can rise as well as fall. Slot allocation is the new idea.
+GOAL: population can rise as well as fall. Slot allocation is the ONE new
+idea. Keep it that way.
 
-WHY IT IS HARD: two ducks breeding independently could pick the same free
-slot and one would silently overwrite the other. vmap cannot help — each
-mapped call cannot see what the others chose. So birth happens OUTSIDE the
-vmap.
+*** DO THIS LEVEL BEFORE 6b. DO NOT LET THE HUMAN SKIP IT. ***
 
-START SIMPLE. Suggest AT MOST ONE BIRTH PER STEP first:
+This was learned the hard way while building this repo. The human said "let's
+go for pair breeding straight away, we need it later" — which is true, pair
+breeding IS needed once traits are heritable (Level 7 recombination needs two
+parents). The coach flagged that it stacked two hard things, then went along
+with it anyway.
 
-    slot   = jnp.argmax(~alive)            # first free slot
-    parent = jnp.argmax(wants_to_breed)
+What happened: pair breeding needs per-tile RANKING, PARTNER LOOKUP, and SLOT
+ALLOCATION all at once. Three new concepts, three (N,N) matrices, a gather
+AND a scatter, and a circular dependency in the ordering. The human got
+visibly lost — "I'm quite stuck", then "I've got a bit lost with where we are
+at" — and reverted to asexual to rebuild understanding. The pair-breeding
+code WORKED and was fully tested; the problem was purely that too much
+arrived at once.
 
-Five lines, unrealistic, but it unblocks population growth and they can see
-it work. Generalise afterwards.
+PUSH BACK ONCE, in these words or similar: "You'll have the same feature by
+the end of the week either way. Asexual first teaches slot allocation on its
+own; then pairing is only about the pairwise matrices — one new idea instead
+of three." If they still want to skip, build it, but say plainly that you
+expect them to need a second pass.
 
-THE GENERAL VERSION: cumsum as an allocator. `jnp.cumsum(free)` tells each
-slot how many free slots precede it — effectively an index into "the nth free
-slot". Same on the breeder side. Match nth breeder to nth free slot, no
-collisions. Worth working out on paper first.
+WHY BREEDING CANNOT LIVE IN THE VMAP — make them derive this. Two foragers
+breeding independently could pick the same free slot and one would silently
+overwrite the other. vmap cannot help: each mapped call cannot see what the
+others chose, and a vmap'd function can only return a value for ITS OWN slot.
+There is no mechanism for "forager 3 writes to slot 40". So birth happens
+outside the vmap, as flat array ops.
+
+THE NEW IDEA: cumsum as an allocator.
+
+    free        = ~foragers.alive
+    free_rank   = jnp.cumsum(free) - 1        # I am the nth free slot
+    parent_rank = jnp.cumsum(can_breed) - 1   # I am the nth parent
+
+cumsum turns "scattered Trues" into "numbered items", so nth parent -> nth
+free slot is a well-defined pairing with no collisions. Let them work out why
+the `- 1` is there (cumsum counts inclusively, so the first True gets 1).
+
+WARN: both rank arrays have JUNK where the mask is False. free_rank for an
+ALIVE slot still holds a number, and it can coincide with a real free slot's
+rank. Always gate on the mask.
+
+THE MATCHING MATRIX — the same broadcast idiom as everywhere else:
+
+    gets_child = free[:, None] & is_parent[None, :] \
+                 & (free_rank[:, None] == parent_rank[None, :])
+
+Three conditions: slot i must be free, forager j must be a parent, and their
+numbers must match. The first two gates are what discard the junk. Have them
+print all three matrices separately — the matching condition ALONE is wrong
+in several cells, and seeing the gates clean it up is the lesson.
+
+    receives    = gets_child.any(axis=1)
+    from_parent = jnp.where(receives, jnp.argmax(gets_child, axis=1), -1)
+
+THE JUNK-INDEX RULE, state it explicitly: every computed index array needs a
+companion validity mask. argmax returns 0 when it finds nothing; cumsum
+numbers masked-out elements too. Neither errors. The masks (`receives`,
+`has_partner`, `free`) are the only way to tell a real answer from a default.
+Making the junk an explicit -1 rather than a silent 0 is worth the line.
+
+THE CIRCULAR ORDERING — this WILL bite them. The capacity gate needs
+parent_rank, but parent_rank is a cumsum OF the parent mask. So:
+
+    1. provisional  can_breed  (no capacity check)
+    2. free, free_rank, parent_rank
+    3. final is_parent = can_breed & (parent_rank < free.sum())
+    4. THEN costs and placement
+
+Without step 3 a parent beyond the free-slot count pays energy for a child
+that never gets created. Ask them what happens when the population is full.
 
 QUESTIONS:
-  - More breeders than free slots — who misses out? Must be deterministic.
-  - Does the parent pay an energy cost? It must, or population explodes.
+  - Does the parent pay? It must, or the population explodes. Halving the
+    parent's energy and giving it to the child CONSERVES energy, which keeps
+    the Level 4 conservation test working unchanged — worth pointing out.
   - Child starts at the parent's cell, or adjacent?
+  - Where in the step order does breeding go (before/after eating)? If before,
+    newborns dilute the food share on their tile that step.
 
-WARN THEM: the "dead ducks stay dead" test from Level 4 WILL now fail,
+WARN THEM: the "dead foragers stay dead" test from Level 4 WILL now fail,
 correctly — slot reuse is the whole point. Change it to assert the reused
 slot was properly reinitialised (fresh energy, fresh traits) rather than that
 it stays dead. A stale field left in a reused slot is a real bug this catches.
 
-CHECKPOINT: population reaches a rough EQUILIBRIUM, not pinned to 0 or to
-MAX_POPULATION. That equilibrium is what gives Level 7's selection something
-to act on — without it there is nothing to evolve.
+CHECKPOINT: a BOOM-BUST curve. With no food regrowth, population should rise
+as foragers breed, then collapse as the world is stripped. That exercises both
+directions of population change in one run and is a better first target than
+equilibrium — the collapse is informative rather than just a drain.
+
+
+================================================================================
+LEVEL 6b — BREEDING, PAIRED                                          [TODO]
+================================================================================
+
+GOAL: two parents on the same tile. Needed for Level 7, where heritable
+traits mean recombination needs two genomes.
+
+ONLY START THIS ONCE 6a WORKS. The slot-allocation machinery carries over
+unchanged; this level adds ONLY the pairing.
+
+THE PROBLEM: pairing up foragers on a tile, without loops, where a forager must not
+be used as a parent twice.
+
+THE SOLUTION — per-tile ranking, then pair consecutive ranks:
+
+    flat      = pos[:, 0] * GRID_SIZE + pos[:, 1]   # 2-D position -> 1 sortable int
+    same_tile = flat[:, None] == flat[None, :]
+    earlier   = idx[:, None] > idx[None, :]
+    rank      = (same_tile & earlier & can_breed[None, :]).sum(axis=1)
+    rank      = jnp.where(can_breed, rank, -1)
+
+Then rank 0 pairs with 1, 2 with 3, and so on, so EVEN ranks are the mothers:
+
+    rank_match  = rank[None, :] == rank[:, None] + 1
+    is_partner  = same_tile & rank_match
+    partner_id  = jnp.argmax(is_partner, axis=1)
+    has_partner = is_partner.any(axis=1)
+    is_mother   = can_breed & has_partner & (rank % 2 == 0)
+
+WHY THE PARITY CHECK: without it, forager rank 1 is both forager 0's partner AND
+has its own successor at rank 2 — so it breeds twice. Restricting mothers to
+even ranks makes each forager belong to exactly one pair.
+
+TEACHING NOTES, in the order confusion actually arose:
+
+  - FLATTENING FIRST. Ask why you cannot build same_tile directly from pos.
+    Answer: pos is (N,2), so pairwise comparison gives (N,N,2) and needs an
+    extra .all(axis=-1). Flattening turns a 2-D identity test into a 1-D one.
+    Point out the trick's safety depends on col < GRID_SIZE, which the clip
+    in the move step guarantees.
+
+  - THE BROADCAST IDIOM NEEDS ITS NAME. The human will ask what to google.
+    `[:, None]` is "None indexing" / "np.newaxis"; the shape-combining rule
+    is "broadcasting"; the pattern `x[:, None] OP x[None, :]` is an "outer
+    comparison". Send them to the NumPy broadcasting docs — JAX inherits the
+    semantics unchanged.
+
+  - EARLIER IS WHAT BREAKS SYMMETRY. same_tile is symmetric, so foragers sharing
+    a tile would all see the same set and tie. Have them print `same_tile`,
+    then `same_tile & earlier`, and watch the triangle appear.
+
+  - THE MASK AXIS MATTERS. `can_breed[None, :]` filters COLUMNS (who gets
+    counted). `can_breed[:, None]` would filter ROWS (who does the counting).
+    Have them try both. And the outer `where` is a THIRD thing: it handles
+    "am I eligible at all", which neither mask asks.
+
+  - GATHER AND SCATTER IN ONE FUNCTION. This is the level where both appear
+    together, and the human will conflate them:
+        energy[partner_id]                    GATHER: read partner's energy,
+                                              result sits at MY index
+        zeros(N).at[partner_id].add(cost)     SCATTER: write my value onto the
+                                              PARTNER's index
+    Teach the habit of labelling every array with what it is INDEXED BY.
+    `.at[idx]` consumes the index — passing `vals[idx]` as well double-applies
+    the mapping and lands everything on slot 0. Silent, no error.
+
+  - -1 % 2 == 1 IN JAX (Python semantics). So rank -1 reads as odd and
+    ineligible foragers are excluded from `is_mother` by accident. Do not rely on
+    it — gate on can_breed explicitly. Changing the sentinel to an even number
+    would silently make every ineligible forager a mother.
+
+CHECK THE ENERGY BOUND: can a parent go negative? With threshold T and a cost
+of energy/2, a parent at T keeps T/2. Have them trace it. Then ask whether the
+PARTNER is guaranteed eligible too (it is — an ineligible forager has rank -1,
+and matching it would need a mother at rank -2 — but make them prove it).
+
+CASES WORTH TESTING (all verifiable by hand):
+  - 3 eligible on one tile -> exactly 1 pair, third untouched
+  - 5 eligible on one tile -> exactly 2 pairs
+  - an INELIGIBLE forager between two eligible ones -> ranks pair across it
+  - two eligible foragers on DIFFERENT tiles -> no breeding
+  - population full -> nothing happens, nobody charged
+  - many mothers, 3 free slots -> exactly 3 births, exactly 6 parents charged
 
 
 ================================================================================
@@ -691,7 +837,7 @@ LEVEL 8 — POISON                                                     [TODO]
 
 GOAL: a selection pressure the future agent can aim.
 
-In this repo poison selects for VISION: ducks that see far enough detect and
+In this repo poison selects for VISION: foragers that see far enough detect and
 avoid poisoned tiles; short-sighted ones wander in. Strength is 0-5.
 
 DESIGN QUESTIONS (theirs to decide, but make them decide deliberately):
@@ -706,7 +852,7 @@ mechanic is dead weight and half the future action space is wasted. Poison
 must buy something food alone cannot.
 
 THE DYNAMIC THIS CREATES — and it is the reason the domain is interesting:
-poison culls low-vision ducks -> mean vision rises -> poison stops working.
+poison culls low-vision foragers -> mean vision rises -> poison stops working.
 The agent's control tool degrades as a direct consequence of using it.
 
 CHECKPOINT: mean vision rises faster with poison than without. AND: the same
@@ -760,7 +906,7 @@ OBJECTIVE: keep the population inside a target band. Reward for in-band,
 minus intervention cost.
 
 OBSERVATION: AGGREGATES ONLY — population count, mean energy, recent growth
-rate, coarse food/poison density per region. NOT the per-duck arrays, NOT the
+rate, coarse food/poison density per region. NOT the per-forager arrays, NOT the
 trait distribution. Partial observability is a design requirement, not an
 oversight.
 

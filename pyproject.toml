@@ -1,7 +1,7 @@
 [project]
-name = "jax-rl-evolutionary"
+name = "foragers-world-rl"
 version = "0.1.0"
-description = "Add your description here"
+description = "A JAX grid-world where foragers eat, breed and evolve, controlled by an RL agent"
 readme = "README.md"
 authors = [
     { name = "raymogg", email = "raymondmogg@gmail.com" }
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-jax-rl-evolutionary = "jax_rl_evolutionary:main"
+foragers-world-rl = "foragers_world_rl:main"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]

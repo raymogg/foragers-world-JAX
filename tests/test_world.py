@@ -18,23 +18,24 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import jax
 import jax.numpy as jnp
 
-from jax_duck_farm.world import (
+from foragers_world_rl.world import (
+    BREED_ENERGY,
     GRID_SIZE,
     MAX_POPULATION,
-    Creatures,
+    Foragers,
     World,
-    compute_breed_rank,
+    breed,
     eat_all,
-    init_creatures,
+    init_foragers,
     step_all,
     zero_eaten_food,
 )
 
-BREED_ENERGY = 4.0  # compute_breed_rank's eligibility threshold
 
 
-def _ducks(positions, energies, alives):
-    """Build a full-size Creatures from a short list, padding the unused slots.
+
+def _foragers(positions, energies, alives):
+    """Build a full-size Foragers from a short list, padding the unused slots.
 
     Padding matters: every slot is computed over, so the padding must not
     accidentally look eligible. Dead + zero energy is inert.
@@ -44,14 +45,14 @@ def _ducks(positions, energies, alives):
     pos = jnp.zeros((MAX_POPULATION, 2), dtype=int).at[:n].set(jnp.array(positions))
     energy = jnp.zeros((MAX_POPULATION,)).at[:n].set(jnp.array(energies, dtype=float))
     alive = jnp.zeros((MAX_POPULATION,), dtype=bool).at[:n].set(jnp.array(alives))
-    return Creatures(pos, energy, alive)
+    return Foragers(pos, energy, alive)
 
 
 def test_food_shared_evenly():
-    """Creatures on the same tile split its food; dead ones neither eat nor dilute.
+    """Foragers on the same tile split its food; dead ones neither eat nor dilute.
 
     This is the scatter-add/gather logic. Never exercised by the main loop --
-    creatures rarely collide on a sparse grid -- so it needs a rigged setup.
+    foragers rarely collide on a sparse grid -- so it needs a rigged setup.
     """
     SHARED = (4, 4)
     FOOD_THERE = 12.0
@@ -62,21 +63,21 @@ def test_food_shared_evenly():
     pos = jnp.array([[4, 4], [4, 4], [4, 4], [7, 1], [4, 4]])
     energy = jnp.full((5,), 10.0)
     alive = jnp.array([True, True, True, True, False])
-    creatures = Creatures(pos, energy, alive)
+    foragers = Foragers(pos, energy, alive)
 
     food = jnp.zeros((GRID_SIZE, GRID_SIZE)).at[SHARED].set(FOOD_THERE)
     food = food.at[7, 1].set(5.0)
     world = World(food)
 
-    per_grid = creatures.per_position_count()
-    assert jnp.allclose(per_grid[SHARED], 3.0), "dead creature counted in divisor"
+    per_grid = foragers.per_position_count()
+    assert jnp.allclose(per_grid[SHARED], 3.0), "dead forager counted in divisor"
     assert jnp.allclose(per_grid[7, 1], 1.0)
 
-    fed = eat_all(world, creatures, per_grid)
+    fed = eat_all(world, foragers, per_grid)
     gained = fed.energy - energy
 
     assert jnp.allclose(gained[:3], FOOD_THERE / 3.0), "food not split evenly"
-    assert jnp.allclose(gained[3], 5.0), "lone creature did not eat whole tile"
+    assert jnp.allclose(gained[3], 5.0), "lone forager did not eat whole tile"
 
     new_world = zero_eaten_food(world, per_grid)
     assert jnp.allclose(new_world.food[SHARED], 0.0), "shared tile not emptied"
@@ -86,29 +87,29 @@ def test_food_shared_evenly():
 def test_energy_conservation():
     """Energy gained by the living == food removed from the world.
 
-    Catches double-eating, dead creatures eating, and food vanishing without
+    Catches double-eating, dead foragers eating, and food vanishing without
     being consumed -- the whole class of scatter/gather bugs at once.
     """
     key = jax.random.key(0)
     key, k = jax.random.split(key)
     world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
     key, k = jax.random.split(key)
-    creatures = init_creatures(k)
+    foragers = init_foragers(k)
 
     for _ in range(10):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        creatures = step_all(world, creatures, step_keys)
+        foragers = step_all(world, foragers, step_keys)
 
         food_before = world.food.sum()
-        energy_before = jnp.where(creatures.alive, creatures.energy, 0.0).sum()
+        energy_before = jnp.where(foragers.alive, foragers.energy, 0.0).sum()
 
-        per_grid = creatures.per_position_count()
-        creatures = eat_all(world, creatures, per_grid)
+        per_grid = foragers.per_position_count()
+        foragers = eat_all(world, foragers, per_grid)
         world = zero_eaten_food(world, per_grid)
 
         food_after = world.food.sum()
-        energy_after = jnp.where(creatures.alive, creatures.energy, 0.0).sum()
+        energy_after = jnp.where(foragers.alive, foragers.energy, 0.0).sum()
 
         eaten = food_before - food_after
         gained = energy_after - energy_before
@@ -125,21 +126,21 @@ def test_population_only_declines_without_food():
     """
     key = jax.random.key(0)
     world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)))
-    creatures = init_creatures(key)
+    foragers = init_foragers(key)
 
-    prev = creatures.population
+    prev = foragers.population
     for _ in range(100):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        creatures = step_all(world, creatures, step_keys)
-        now = creatures.population
+        foragers = step_all(world, foragers, step_keys)
+        now = foragers.population
         assert now <= prev, f"population rose from {prev} to {now} with no food"
         prev = now
 
-    assert creatures.population == 0, "creatures survived with no food at all"
+    assert foragers.population == 0, "foragers survived with no food at all"
 
 
-def test_dead_creatures_stay_dead():
+def test_dead_foragers_stay_dead():
     """Death is permanent: a dead slot never becomes alive again.
 
     Nothing in the current design resurrects, so this guards against a future
@@ -148,37 +149,37 @@ def test_dead_creatures_stay_dead():
     key = jax.random.key(1)
     key, k = jax.random.split(key)
     world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
-    creatures = init_creatures(key)
+    foragers = init_foragers(key)
 
     # Kill slot 0 outright.
-    creatures = creatures._replace(
-        energy=creatures.energy.at[0].set(0.0),
-        alive=creatures.alive.at[0].set(False),
+    foragers = foragers._replace(
+        energy=foragers.energy.at[0].set(0.0),
+        alive=foragers.alive.at[0].set(False),
     )
 
     for _ in range(20):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        creatures = step_all(world, creatures, step_keys)
-        per_grid = creatures.per_position_count()
-        creatures = eat_all(world, creatures, per_grid)
+        foragers = step_all(world, foragers, step_keys)
+        per_grid = foragers.per_position_count()
+        foragers = eat_all(world, foragers, per_grid)
         world = zero_eaten_food(world, per_grid)
-        assert not creatures.alive[0], "a dead creature came back to life"
+        assert not foragers.alive[0], "a dead forager came back to life"
 
 
-def test_creatures_stay_on_grid():
+def test_foragers_stay_on_grid():
     """Positions never leave the grid. Catches a broken clip in the move step."""
     key = jax.random.key(2)
     key, k = jax.random.split(key)
     world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
-    creatures = init_creatures(key)
+    foragers = init_foragers(key)
 
     for _ in range(50):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        creatures = step_all(world, creatures, step_keys)
-        assert creatures.pos.min() >= 0, "position went negative"
-        assert creatures.pos.max() < GRID_SIZE, "position exceeded grid"
+        foragers = step_all(world, foragers, step_keys)
+        assert foragers.pos.min() >= 0, "position went negative"
+        assert foragers.pos.max() < GRID_SIZE, "position exceeded grid"
 
 
 def test_shapes_are_stable():
@@ -191,21 +192,21 @@ def test_shapes_are_stable():
     key = jax.random.key(3)
     key, k = jax.random.split(key)
     world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
-    creatures = init_creatures(key)
+    foragers = init_foragers(key)
 
-    expected = jax.tree.map(lambda a: a.shape, creatures)
+    expected = jax.tree.map(lambda a: a.shape, foragers)
     food_shape = world.food.shape
 
     for i in range(10):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        creatures = step_all(world, creatures, step_keys)
-        per_grid = creatures.per_position_count()
-        creatures = eat_all(world, creatures, per_grid)
+        foragers = step_all(world, foragers, step_keys)
+        per_grid = foragers.per_position_count()
+        foragers = eat_all(world, foragers, per_grid)
         world = zero_eaten_food(world, per_grid)
 
-        got = jax.tree.map(lambda a: a.shape, creatures)
-        assert got == expected, f"creature shapes changed at step {i}: {got}"
+        got = jax.tree.map(lambda a: a.shape, foragers)
+        assert got == expected, f"forager shapes changed at step {i}: {got}"
         assert world.food.shape == food_shape, (
             f"food shape changed at step {i}: {world.food.shape}"
         )
@@ -216,158 +217,185 @@ def test_no_nans():
     key = jax.random.key(4)
     key, k = jax.random.split(key)
     world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
-    creatures = init_creatures(key)
+    foragers = init_foragers(key)
 
     for i in range(50):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        creatures = step_all(world, creatures, step_keys)
-        per_grid = creatures.per_position_count()
-        creatures = eat_all(world, creatures, per_grid)
+        foragers = step_all(world, foragers, step_keys)
+        per_grid = foragers.per_position_count()
+        foragers = eat_all(world, foragers, per_grid)
         world = zero_eaten_food(world, per_grid)
 
-        assert jnp.isfinite(creatures.energy).all(), f"non-finite energy at step {i}"
+        assert jnp.isfinite(foragers.energy).all(), f"non-finite energy at step {i}"
         assert jnp.isfinite(world.food).all(), f"non-finite food at step {i}"
 
 
 def test_randomness_actually_advances():
     """Successive steps must use different randomness.
 
-    Reusing a key is silent: the code runs, creatures just replay identical
-    moves forever. Over 20 steps with fresh keys, at least one creature must
+    Reusing a key is silent: the code runs, foragers just replay identical
+    moves forever. Over 20 steps with fresh keys, at least one forager must
     have visited more than one position.
     """
     key = jax.random.key(5)
     world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)))
-    creatures = init_creatures(key)
-    creatures = creatures._replace(energy=jnp.full((MAX_POPULATION,), 1e6))
+    foragers = init_foragers(key)
+    foragers = foragers._replace(energy=jnp.full((MAX_POPULATION,), 1e6))
 
     seen = []
     for _ in range(20):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        creatures = step_all(world, creatures, step_keys)
-        seen.append(creatures.pos[0].tolist())
+        foragers = step_all(world, foragers, step_keys)
+        seen.append(foragers.pos[0].tolist())
 
     assert len(set(map(tuple, seen))) > 1, (
-        "creature 0 never changed position -- key is probably not advancing"
+        "forager 0 never changed position -- key is probably not advancing"
     )
 
 
-def test_breed_rank_paper_case():
-    """The hand-worked example: ducks rank 0,1,2.. among eligible peers on their tile.
+def test_breed_child_gets_half_parent_energy():
+    """A breeding forager halves its energy; the child gets the other half.
 
-    4 ducks on tile (4,4) but slot 3 is INELIGIBLE (energy below threshold),
-    so the eligible ones there rank 0, 1, 2 -- skipping slot 3 entirely.
-    Slot 3 gets -1 even though it sits among them. Slots 2 and 5 are alone on
-    their own tiles, so each ranks 0.
+    Energy is conserved by breeding, which is why the conservation test above
+    keeps working unchanged.
     """
-    ducks = _ducks(
-        positions=[[4, 4], [4, 4], [7, 1], [4, 4], [4, 4], [0, 0]],
-        energies=[10.0, 10.0, 10.0, 1.0, 10.0, 10.0],  # slot 3 too poor to breed
-        alives=[True] * 6,
+    foragers = _foragers(
+        positions=[[4, 4]],
+        energies=[10.0],
+        alives=[True],
     )
-    rank = compute_breed_rank(ducks)
+    out = breed(foragers)
 
-    assert rank[:6].tolist() == [0, 1, 0, -1, 2, 0], rank[:6].tolist()
-    # Unused padding slots are dead, so all ineligible.
-    assert (rank[6:] == -1).all(), "padding slots should be ineligible"
+    assert out.population == 2, f"expected 1 birth, got pop {out.population}"
+    assert jnp.allclose(out.energy[0], 5.0), "parent did not halve its energy"
+    # The child is in the first free slot, which is slot 1.
+    assert jnp.allclose(out.energy[1], 5.0), "child did not get half"
+    assert jnp.allclose(out.energy.sum(), foragers.energy.sum()), "breeding changed total energy"
 
 
-def test_breed_rank_dead_ducks_excluded():
-    """A dead duck is never eligible, and never occupies a rank.
+def test_breed_child_starts_at_parent_position():
+    """The child appears on the parent's tile."""
+    foragers = _foragers(positions=[[3, 7]], energies=[10.0], alives=[True])
+    out = breed(foragers)
+    assert out.pos[1].tolist() == [3, 7], out.pos[1].tolist()
 
-    Slot 1 is dead but has plenty of energy and sits on the shared tile. If
-    the alive mask were dropped it would take rank 1 and push slot 2 to 2.
+
+def test_breed_below_threshold_does_nothing():
+    """A forager under BREED_ENERGY does not breed and is not charged."""
+    foragers = _foragers(positions=[[4, 4]], energies=[BREED_ENERGY - 0.01], alives=[True])
+    out = breed(foragers)
+    assert out.population == 1, "bred despite being under the threshold"
+    assert jnp.allclose(out.energy, foragers.energy), "charged despite not breeding"
+
+
+def test_breed_threshold_is_inclusive():
+    """Energy exactly at BREED_ENERGY is enough. Pins the >= / > boundary."""
+    foragers = _foragers(positions=[[4, 4]], energies=[BREED_ENERGY], alives=[True])
+    out = breed(foragers)
+    assert out.population == 2, "energy at the threshold should breed"
+
+
+def test_breed_many_parents_get_distinct_slots():
+    """Several parents breed at once and no two children share a slot.
+
+    The whole point of the cumsum allocator. If two parents picked the same
+    free slot, one child would be silently overwritten and the population
+    would come out short.
     """
-    ducks = _ducks(
-        positions=[[3, 3], [3, 3], [3, 3]],
-        energies=[10.0, 10.0, 10.0],
-        alives=[True, False, True],
-    )
-    rank = compute_breed_rank(ducks)
-    assert rank[:3].tolist() == [0, -1, 1], rank[:3].tolist()
-
-
-def test_breed_rank_nobody_eligible():
-    """No eligible ducks -> every rank is -1, and nothing errors."""
-    ducks = _ducks(
-        positions=[[1, 1], [1, 1], [2, 2]],
-        energies=[0.5, 1.0, 2.0],  # all below BREED_ENERGY
-        alives=[True, True, True],
-    )
-    rank = compute_breed_rank(ducks)
-    assert (rank == -1).all(), "nobody should be eligible"
-
-
-def test_breed_rank_all_on_one_tile():
-    """N eligible ducks on one tile get exactly the ranks 0..N-1, no repeats.
-
-    A repeat here would mean two ducks pair with the same partner.
-    """
-    n = 8
-    ducks = _ducks(
-        positions=[[5, 5]] * n,
+    n = 5
+    foragers = _foragers(
+        positions=[[i, i] for i in range(n)],
         energies=[10.0] * n,
         alives=[True] * n,
     )
-    rank = compute_breed_rank(ducks)
-    assert sorted(rank[:n].tolist()) == list(range(n)), rank[:n].tolist()
+    out = breed(foragers)
+
+    assert out.population == 2 * n, f"expected {2*n} foragers, got {out.population}"
+    assert jnp.allclose(out.energy.sum(), foragers.energy.sum()), "energy not conserved"
+    # Every child sits on its parent's tile, so each tile holds exactly 2 foragers.
+    for i in range(n):
+        on_tile = ((out.pos[:, 0] == i) & (out.pos[:, 1] == i) & out.alive).sum()
+        assert on_tile == 2, f"tile ({i},{i}) holds {on_tile} foragers, expected 2"
 
 
-def test_breed_rank_all_on_separate_tiles():
-    """Ducks alone on their own tiles all rank 0 -- rank is per-tile, not global."""
-    n = 6
-    ducks = _ducks(
-        positions=[[i, 0] for i in range(n)],
-        energies=[10.0] * n,
-        alives=[True] * n,
-    )
-    rank = compute_breed_rank(ducks)
-    assert rank[:n].tolist() == [0] * n, rank[:n].tolist()
+def test_breed_respects_capacity():
+    """More would-be parents than free slots: only as many births as slots.
 
-
-def test_breed_rank_threshold_is_inclusive():
-    """Energy exactly at the threshold is eligible; just under is not.
-
-    Pins the boundary so a >= / > slip shows up as a failure.
+    Critically, a parent that misses out must NOT be charged energy -- that is
+    what the two-stage is_parent gate is for.
     """
-    ducks = _ducks(
+    # Fill every slot but 3, all with breeding energy.
+    n_free = 3
+    n_alive = MAX_POPULATION - n_free
+    foragers = _foragers(
+        positions=[[i % GRID_SIZE, 0] for i in range(n_alive)],
+        energies=[10.0] * n_alive,
+        alives=[True] * n_alive,
+    )
+    out = breed(foragers)
+
+    assert out.population == MAX_POPULATION, "should fill every free slot"
+    charged = ((out.energy < foragers.energy) & foragers.alive).sum()
+    assert charged == n_free, f"{charged} foragers charged, expected {n_free}"
+    assert jnp.allclose(out.energy.sum(), foragers.energy.sum()), "energy not conserved"
+
+
+def test_breed_full_population_does_nothing():
+    """With no free slots, nothing happens and nobody pays."""
+    foragers = _foragers(
+        positions=[[i % GRID_SIZE, 0] for i in range(MAX_POPULATION)],
+        energies=[10.0] * MAX_POPULATION,
+        alives=[True] * MAX_POPULATION,
+    )
+    out = breed(foragers)
+
+    assert out.population == MAX_POPULATION
+    assert jnp.allclose(out.energy, foragers.energy), "charged energy with nowhere to put a child"
+
+
+def test_breed_dead_foragers_do_not_breed():
+    """A dead slot with high energy is not a parent.
+
+    Slot 0 is dead, so it is also the first FREE slot -- the living forager's
+    child lands there. So the check is that exactly one birth happened and
+    energy was conserved, not that slot 0 is untouched.
+    """
+    foragers = _foragers(
         positions=[[2, 2], [2, 2]],
-        energies=[BREED_ENERGY, BREED_ENERGY - 0.01],
-        alives=[True, True],
+        energies=[10.0, 10.0],
+        alives=[False, True],
     )
-    rank = compute_breed_rank(ducks)
-    assert rank[0] == 0, "energy at the threshold should be eligible"
-    assert rank[1] == -1, "energy below the threshold should not be eligible"
+    out = breed(foragers)
+
+    # One living parent -> one child. Total alive goes 1 -> 2.
+    assert foragers.population == 1
+    assert out.population == 2, "expected exactly one birth"
+    # The dead forager's 10.0 was never a parent's energy, so it is not halved and
+    # handed on -- the child's 5.0 comes from the LIVING forager only.
+    assert jnp.allclose(out.energy[1], 5.0), "living parent did not halve"
+    assert jnp.allclose(out.energy[0], 5.0), "child should hold the other half"
 
 
-def test_breed_rank_ranks_are_contiguous_per_tile():
-    """On any tile, the eligible ducks' ranks are exactly 0..k-1.
+def test_breed_dead_forager_energy_is_not_inherited():
+    """A dead forager's energy is never passed to a child.
 
-    A property over random states rather than a fixed case: catches gaps and
-    duplicates that a hand-built example might miss.
+    Here the dead forager is at a HIGHER slot than the parent, so it is not the
+    first free slot and does not get overwritten. Its energy must be untouched.
     """
-    key = jax.random.key(7)
-    for _ in range(20):
-        key, kp, ke, ka = jax.random.split(key, 4)
-        pos = jax.random.randint(kp, (MAX_POPULATION, 2), 0, 3)  # small grid -> collisions
-        energy = jax.random.uniform(ke, (MAX_POPULATION,), minval=0.0, maxval=8.0)
-        alive = jax.random.uniform(ka, (MAX_POPULATION,)) > 0.3
-        ducks = Creatures(pos, energy, alive)
+    foragers = _foragers(
+        positions=[[2, 2], [2, 2], [2, 2]],
+        energies=[10.0, 99.0, 0.0],
+        alives=[True, False, False],
+    )
+    out = breed(foragers)
 
-        rank = compute_breed_rank(ducks)
-        eligible = alive & (energy >= BREED_ENERGY)
-        flat = pos[:, 0] * GRID_SIZE + pos[:, 1]
-
-        for tile in jnp.unique(flat).tolist():
-            on_tile = (flat == tile) & eligible
-            got = sorted(rank[on_tile].tolist())
-            assert got == list(range(len(got))), (
-                f"tile {tile}: ranks {got} are not contiguous from 0"
-            )
-
-
+    assert out.population == 2, "only the living forager should breed"
+    assert jnp.allclose(out.energy[0], 5.0), "parent did not halve"
+    # Slot 1 is free and is free_rank 0, so the child lands there, replacing the
+    # stale 99.0. That is the point: a reused slot must be fully reinitialised.
+    assert jnp.allclose(out.energy[1], 5.0), "reused slot kept its stale energy"
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
