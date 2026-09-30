@@ -11,11 +11,19 @@ effective.
 **Built end-to-end in JAX:** pure functional `step()`, `vmap` over the population
 and over parallel worlds, `jit`-compiled throughout.
 
+## Setup
+
+Managed with [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync
+```
+
 ## Running
 
 ```bash
-.venv/bin/python src/foragers_world_rl/world.py   # run the simulation
-.venv/bin/python tests/test_world.py              # run the test suite
+uv run python src/foragers_world_rl/world.py   # run the simulation
+uv run python tests/test_world.py              # run the test suite
 ```
 
 ## Viewing a run
@@ -23,16 +31,23 @@ and over parallel worlds, `jit`-compiled throughout.
 Record a trajectory, then replay it in the browser:
 
 ```bash
-PYTHONPATH=src .venv/bin/python src/foragers_world_rl/record_run.py \
-    --steps 200 --seed 0 --out runs/run.json
+uv run python src/foragers_world_rl/record_run.py --steps 200 --seed 0 --out runs/run.json
 
-python3 -m http.server          # then open localhost:8000/viewer/
+uv run python -m http.server          # then open localhost:8000/viewer/
 ```
 
+`record_run.py` takes `--steps`, `--seed`, `--out`, and `--run-to-end` (keep
+recording after extinction instead of stopping).
+
 The viewer is a single static HTML file with no build step. It shows the food
-grid, foragers sized by energy, a population/food chart, and a scrubber — or
-drag any trajectory JSON onto the page. `runs/sample.json` is checked in as an
-example.
+grid, foragers sized by energy, a population/food chart, and a scrubber. The
+dropdown lists whatever is in `runs/`, or you can drag any trajectory JSON onto
+the page — that works without the server too. `runs/sample.json` is checked in
+as an example.
+
+Food is delta-encoded in the JSON: frame 0 carries the full grid and later frames
+only the cells that changed. On a 100×100 grid roughly a dozen of 10,000 cells
+change per step, so this is about 17× smaller than storing every frame in full.
 
 ## Current feature set
 
@@ -40,7 +55,8 @@ example.
 - Foragers eat, sharing a tile's food evenly between everyone standing on it
 - Foragers starve when energy hits zero
 - Foragers breed asexually, splitting their energy with the offspring
-- Property-based test suite (17 tests, no pytest needed)
+- Trajectory recording to JSON, plus a browser viewer
+- Property-based test suite (20 tests, no pytest needed)
 
 ## Coming soon
 
