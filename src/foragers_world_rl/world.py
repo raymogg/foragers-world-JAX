@@ -9,7 +9,7 @@ GRID_SIZE = 100
 SIMULATION_STEPS = 1000
 # Min energy to breed. A parent pays energy/2 + 1, so at the threshold it keeps 1.
 BREED_ENERGY = 4.0
-MOVE_COSTS = [1.0, 3.0, 5.0]
+MOVE_COSTS = jnp.array([1.0, 3.0, 5.0])
 
 class World(NamedTuple):
     food: jax.Array #(X, Y) float
