@@ -1,5 +1,6 @@
 import jax, jax.numpy as jnp
 from typing import NamedTuple
+from enum import Enum
 
 # keep small for initial testing
 MAX_POPULATION = 256
@@ -8,11 +9,12 @@ GRID_SIZE = 100
 SIMULATION_STEPS = 1000
 # Min energy to breed. A parent pays energy/2 + 1, so at the threshold it keeps 1.
 BREED_ENERGY = 4.0
+MOVE_COSTS = [1.0, 3.0, 5.0]
 
 class World(NamedTuple):
     food: jax.Array #(X, Y) float
-    # Defaults to an empty grid so callers that predate poison still work.
-    poison: jax.Array = jnp.zeros((GRID_SIZE, GRID_SIZE))
+    # Not used for now
+    poison: jax.Array
 
     @property
     def total_food(self):
@@ -63,13 +65,13 @@ class EnvState(NamedTuple):
     world: World
 
 # Single move step of all foragers
-def step(world: World, forager: Foragers, key: jax.Array) -> tuple[Foragers]:
+def step(world: World, forager: Foragers, key: jax.Array, move_cost: float) -> tuple[Foragers]:
     
     # Single step for a single forager
     delta = jax.random.randint(key, (2,), -1, 2)
 
     # produce can_move array
-    can_move = forager.alive & (forager.energy >= 1.0)
+    can_move = forager.alive & (forager.energy >= move_cost)
 
     # Avoid forager moving if no energy to do so
     new_forager_pos = jnp.where(can_move, 
@@ -77,7 +79,7 @@ def step(world: World, forager: Foragers, key: jax.Array) -> tuple[Foragers]:
                                 forager.pos)
 
     # Cost of 1 step is 1 energy, food gives 1 energy per unit
-    new_forager_energy = jnp.where(forager.alive, forager.energy - 1, 0.0)
+    new_forager_energy = jnp.where(forager.alive, forager.energy - move_cost, 0.0)
 
     new_alive = forager.alive & (new_forager_energy > 0.0)
 
@@ -160,17 +162,18 @@ def breed(forager: Foragers) -> Foragers:
 
 
 # Vmap functions
-step_all = jax.vmap(step, in_axes=(None, 0, 0))
+step_all = jax.vmap(step, in_axes=(None, 0, 0, None))
 eat_all = jax.vmap(eat, in_axes=(None, 0, None))
 zero_all = jax.vmap(zero_eaten_food, in_axes=(0, 0))
 
 # Initial base for RL -> returns new state, obs, rewards and done.
-def env_step(state: EnvState, action, step_key) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
+def env_step(state: EnvState, action: float, step_key) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
+    # agent action - currently only updates forager movement cost
+    new_move_cost = MOVE_COSTS[action]
 
-    # for i in range(SIMULATION_STEPS):
-    #key, step_key = jax.random.split(key)
+    # world = World(world.food, world.poison, new_move_cost)
     step_keys = jax.random.split(step_key, MAX_POPULATION)
-    foragers = step_all(state.world, state.foragers, step_keys)
+    foragers = step_all(state.world, state.foragers, step_keys, new_move_cost)
 
     per_grid = foragers.per_position_count()
     foragers = eat_all(state.world, foragers, per_grid)
