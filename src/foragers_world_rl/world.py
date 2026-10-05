@@ -10,8 +10,9 @@ SIMULATION_STEPS = 1000
 BREED_ENERGY = 4.0
 
 class World(NamedTuple):
-    food: jax.Array #(X, Y) int
-    poison: jax.Array #(X, Y) int
+    food: jax.Array #(X, Y) float
+    # Defaults to an empty grid so callers that predate poison still work.
+    poison: jax.Array = jnp.zeros((GRID_SIZE, GRID_SIZE))
 
     @property
     def total_food(self):

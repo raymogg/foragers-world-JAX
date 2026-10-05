@@ -1,10 +1,10 @@
 """Run a simulation and write its trajectory to JSON for the web viewer.
 
-    .venv/bin/python src/foragers_world_rl/record_run.py
-    .venv/bin/python src/foragers_world_rl/record_run.py --steps 200 --seed 3 --out runs/seed3.json
+    uv run python src/foragers_world_rl/record_run.py
+    uv run python src/foragers_world_rl/record_run.py --steps 200 --seed 3 --out runs/seed3.json
 
-The step order here mirrors world.py's main block: move -> count -> eat ->
-clear food -> breed, with the snapshot taken at the end of each step.
+The loop here mirrors world.py's main block: it drives env_step and snapshots
+the state it returns. The step order lives in env_step, not here.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import jax
+import jax.numpy as jnp
 
 from foragers_world_rl.recorder import Recorder
 from foragers_world_rl.world import (
@@ -25,12 +26,10 @@ from foragers_world_rl.world import (
     GRID_SIZE,
     INITIAL_POPULATION,
     MAX_POPULATION,
+    EnvState,
     World,
-    breed,
-    eat_all,
+    env_step,
     init_foragers,
-    step_all,
-    zero_all,
 )
 
 
@@ -41,10 +40,13 @@ def record(steps: int, seed: int, out: Path, stop_when_extinct: bool = True) -> 
     initial_food = jax.random.randint(
         food_key, (GRID_SIZE, GRID_SIZE), 0, 5
     ).astype(float)
-    world = World(initial_food)
+    initial_poison = jnp.zeros((GRID_SIZE, GRID_SIZE))
+    world = World(initial_food, initial_poison)
 
     key, forager_key = jax.random.split(key)
     foragers = init_foragers(forager_key)
+
+    state = EnvState(foragers, world)
 
     rec = Recorder(
         grid_size=GRID_SIZE,
@@ -59,22 +61,17 @@ def record(steps: int, seed: int, out: Path, stop_when_extinct: bool = True) -> 
             "food_regrowth": False,
         },
     )
-    rec.snapshot(world, foragers)  # frame 0 = the initial state
+    # frame 0 = the initial state
+    rec.snapshot(state.world, state.foragers)
 
     for _ in range(steps):
         key, step_key = jax.random.split(key)
-        step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        # No agent yet, so the action is a placeholder env_step ignores.
+        state, _obs, _reward, _done = env_step(state, 0, step_key)
 
-        per_grid = foragers.per_position_count()
-        foragers = eat_all(world, foragers, per_grid)
-        world = zero_all(world, per_grid)
+        rec.snapshot(state.world, state.foragers)
 
-        foragers = breed(foragers)
-
-        rec.snapshot(world, foragers)
-
-        if stop_when_extinct and foragers.population == 0:
+        if stop_when_extinct and state.foragers.population == 0:
             break
 
     path = rec.save(out)
