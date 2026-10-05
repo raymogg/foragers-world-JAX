@@ -11,10 +11,15 @@ BREED_ENERGY = 4.0
 
 class World(NamedTuple):
     food: jax.Array #(X, Y) int
+    poison: jax.Array #(X, Y) int
 
     @property
     def total_food(self):
         return jnp.sum(self.food)
+
+    @property
+    def total_poison(self):
+        return jnp.sum(self.poison)
 
 class Foragers(NamedTuple):
     pos: jax.Array #(MAX_POPULATION, 2) int
@@ -51,7 +56,10 @@ class Foragers(NamedTuple):
     def can_breed(self):
         return self.alive & (self.energy >= BREED_ENERGY)
 
+class EnvState(NamedTuple):
 
+    foragers: Foragers
+    world: World
 
 # Single move step of all foragers
 def step(world: World, forager: Foragers, key: jax.Array) -> tuple[Foragers]:
@@ -100,7 +108,7 @@ def eat(world: World, forager: Foragers, per_grid_count: jax.Array) -> tuple[For
 
 def zero_eaten_food(world: World, per_grid_count: jax.Array) -> tuple[World]:
     new_food = jnp.where(per_grid_count > 0, 0, world.food)
-    new_world = World(new_food)
+    new_world = World(new_food, world.poison)
     return new_world
 
 # asexual breeding
@@ -148,22 +156,48 @@ def breed(forager: Foragers) -> Foragers:
     new_alive = forager.alive | receives
 
     return Foragers(new_pos, new_energy, new_alive)
+
+
 # Vmap functions
 step_all = jax.vmap(step, in_axes=(None, 0, 0))
 eat_all = jax.vmap(eat, in_axes=(None, 0, None))
 zero_all = jax.vmap(zero_eaten_food, in_axes=(0, 0))
+
+# Initial base for RL -> returns new state, obs, rewards and done.
+def env_step(state: EnvState, action, step_key) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
+
+    # for i in range(SIMULATION_STEPS):
+    #key, step_key = jax.random.split(key)
+    step_keys = jax.random.split(step_key, MAX_POPULATION)
+    foragers = step_all(state.world, state.foragers, step_keys)
+
+    per_grid = foragers.per_position_count()
+    foragers = eat_all(state.world, foragers, per_grid)
+    world = zero_all(state.world, per_grid)
+
+    foragers = breed(foragers)
+
+    # Update the state
+    new_state = EnvState(foragers, world)
+
+    # Finished without population dying
+    return new_state, jnp.zeros(1), jnp.zeros(1), jnp.zeros(1) 
 
 if __name__ == "__main__":
     key = jax.random.key(0)
 
     key, food_rand = jax.random.split(key)
     initial_food = jax.random.randint(food_rand, (GRID_SIZE, GRID_SIZE), 0, 5, dtype=int)
-    world = World(initial_food)
+    initial_poison = jnp.zeros((GRID_SIZE, GRID_SIZE))
+    world = World(initial_food, initial_poison)
 
     # Init some random foragers for using vmap
     key, foragers_rand = jax.random.split(key)
     # Put INITIAL_POPULATION foragers on the grid
     foragers = init_foragers(key)
+
+    env_state = EnvState(foragers, world)
+
 
     # Simulate N steps. Order: move -> count -> eat -> clear food -> breed.
     # Breeding last so newborns do not dilute the food share on their tile this
@@ -171,23 +205,14 @@ if __name__ == "__main__":
     print(f"{'step':>5} {'pop':>5} {'mean_energy':>12} {'food':>10}")
     for i in range(SIMULATION_STEPS):
         key, step_key = jax.random.split(key)
-        step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        env_state, obs, rewards, done = env_step(env_state, 0, step_key)
 
-        per_grid = foragers.per_position_count()
-        foragers = eat_all(world, foragers, per_grid)
-        world = zero_all(world, per_grid)
-
-        foragers = breed(foragers)
-
-        if i % 10 == 0 or foragers.population == 0:
-            print(f"{i:>5} {int(foragers.population):>5} "
-                  f"{float(foragers.mean_energy):>12.2f} "
-                  f"{float(world.total_food):>10.1f}")
-        if foragers.population == 0:
+        if i % 10 == 0 or env_state.foragers.population == 0:
+            print(f"{i:>5} {int(env_state.foragers.population):>5} "
+                    f"{float(env_state.foragers.mean_energy):>12.2f} "
+                    f"{float(env_state.world.total_food):>10.1f}")
+        if env_state.foragers.population == 0:
             print("extinct")
-            break
-
 
 
 
