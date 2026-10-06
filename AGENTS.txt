@@ -65,17 +65,41 @@ THE ARC
   Level 2   Many foragers, fixed shapes              -> the mask, vmap
   Level 3   Foragers interact (eating)               -> scatter-add / gather
   Level 4   A test suite                          -> properties, not values
-  Level 5   Food regrowth                         -> equilibrium        [TODO]
-  Level 6a  Breeding, asexual                     -> slot allocation    [TODO]
-  Level 6b  Breeding, paired                      -> pairwise matching  [TODO]
-  Level 7   Heritable traits                      -> evolution          [TODO]
-  Level 8   Poison                                -> selection pressure [TODO]
-  Level 9   Batch the worlds                      -> scan, steps/sec    [TODO]
+  Level 5   Food regrowth                         -> equilibrium        [DONE]
+  Level 6a  Breeding, asexual                     -> slot allocation    [DONE]
+  Level 6b  Breeding, paired                      -> pairwise matching  [CUT]
+  Level 7   Heritable traits                      -> evolution        [DEFERRED]
+  Level 8   Poison                                -> selection pressure [CUT]
+  Level 9   Batch the worlds                      -> scan, steps/sec    [DONE]
   Level 10  The RL agent                          -> PPO                [TODO]
 
 Levels 0-4 are written below and are known to work — they are what this repo
 was actually built with. Later levels are stubs; fill them in as the repo
 grows.
+
+Status, 2026-10-06. The goal became "reach RL quickly", so the roadmap was cut
+back to the minimum that supports an interesting agent:
+
+  Level 5  DONE      Bernoulli regrowth + a per-tile cap. This is what creates
+                     the equilibrium; without it every run ends extinct in ~35
+                     steps and there is nothing for an agent to control.
+  Level 6a DONE      Asexual breeding closes the population loop.
+  Level 6b CUT       Asexual already closes the loop. Paired breeding only
+                     matters once traits can recombine.
+  Level 7  DEFERRED  The evolutionary payoff, not an RL prerequisite. Revisit
+                     once PPO works.
+  Level 8  CUT       Poison was going to be the agent's lever, but a single
+                     global knob (movement cost) was enough to get the whole
+                     framework in place. The World.poison field exists and is
+                     carried through untouched; nothing writes to it.
+  Level 9  DONE      env_step runs under jit and lax.scan, and vmaps over
+                     worlds. 135 steps/sec in a Python loop -> 9,100 jitted,
+                     16,700 across 256 worlds.
+  Level 10 NEXT      PPO.
+
+The action is currently MOVE_COSTS[action] — a 12-way discrete choice of
+movement cost. Richer actions (plant food in a region, poison a region) are the
+planned upgrade once an agent trains at all.
 
 
 ================================================================================

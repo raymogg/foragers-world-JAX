@@ -244,39 +244,3 @@ def env_step(state: EnvState, action: jax.Array, step_key: jax.Array) -> tuple[E
     done = (foragers.population == 0) | (new_state.step_count >= EPISODE_STEPS)
 
     return new_state, obs, reward, done
-
-if __name__ == "__main__":
-    key = jax.random.key(0)
-
-    key, init_key = jax.random.split(key)
-    env_state = init_env_state(init_key)
-
-
-    # Simulate N steps. Order: move -> count -> eat -> clear food -> breed.
-    # Breeding last so newborns do not dilute the food share on their tile this
-    # step; they move and eat on the next one.
-    total_reward = 0.0
-    print(f"{'step':>5} {'pop':>5} {'mean_energy':>12} {'food':>10} {'reward':>8}")
-    for i in range(EPISODE_STEPS):
-        key, step_key = jax.random.split(key)
-        env_state, obs, reward, done = env_step(env_state, 4, step_key)
-
-        total_reward += float(reward)
-
-        if i % 10 == 0 or bool(done):
-            print(f"{i:>5} {int(env_state.foragers.population):>5} "
-                    f"{float(env_state.foragers.mean_energy):>12.2f} "
-                    f"{float(env_state.world.total_food):>10.1f} "
-                    f"{total_reward:>8.0f}")
-        # done covers both extinction and the episode cap.
-        if bool(done):
-            if env_state.foragers.population == 0:
-                print("extinct")
-            break
-
-    print(f"\nreward: {total_reward:.0f}/{EPISODE_STEPS} steps in band "
-          f"{POP_BAND_LOW}-{POP_BAND_HIGH}")
-
-
-
-

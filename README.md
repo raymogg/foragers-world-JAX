@@ -31,13 +31,14 @@ uv run python tests/test_world.py              # run the test suite
 Record a trajectory, then replay it in the browser:
 
 ```bash
-uv run python src/foragers_world_rl/record_run.py --steps 200 --seed 0 --out runs/run.json
+uv run python src/foragers_world_rl/agent.py fixed:6 --record runs/run.json
 
 uv run python -m http.server          # then open localhost:8000/viewer/
 ```
 
-`record_run.py` takes `--steps`, `--seed`, `--out`, and `--run-to-end` (keep
-recording after extinction instead of stopping).
+`--record` replays a single episode and snapshots every step. It is separate
+from the batched evaluation: `--worlds` runs N episodes in parallel to get a
+score, while `--record` writes one watchable trajectory.
 
 The viewer is a single static HTML file with no build step. It shows the food
 grid, foragers sized by energy, a population/food chart, and a scrubber. The
