@@ -4,8 +4,13 @@ from typing import NamedTuple
 # keep small for initial testing
 MAX_POPULATION = 256
 INITIAL_POPULATION = 16
-GRID_SIZE = 30
-SIMULATION_STEPS = 1000
+# target range for RL
+POP_BAND_LOW, POP_BAND_HIGH = 80, 140
+
+# must be 2^n
+GRID_SIZE = 32
+# Episode length for RL. scan needs a statically known trip count.
+EPISODE_STEPS = 500
 MAX_FOOD_PER_TILE = 5.0
 FOOD_REGROWTH_RATE = 0.2
 
@@ -61,10 +66,17 @@ class Foragers(NamedTuple):
     def can_breed(self):
         return self.alive & (self.energy >= BREED_ENERGY)
 
-class EnvState(NamedTuple):
+    def population_in_band(self, band_low, band_high) -> jax.Array:
+        # `&`, not `and`/chained comparison: Python's version calls __bool__ on a
+        # traced array, which raises under jit.
+        return (self.population >= band_low) & (self.population <= band_high)
 
+class EnvState(NamedTuple):
     foragers: Foragers
     world: World
+    # Step counter lives in the state so lax.scan threads it for us, rather
+    # than the caller passing it in and the two drifting apart.
+    step_count: jax.Array  # () int
 
 # Single move step of all foragers
 def step(world: World, forager: Foragers, key: jax.Array, move_cost: float) -> tuple[Foragers]:
@@ -179,8 +191,26 @@ eat_all = jax.vmap(eat, in_axes=(None, 0, None))
 zero_all = jax.vmap(zero_eaten_food, in_axes=(0, 0))
 regrow_all_food = jax.vmap(regrow_food, in_axes=(0, None))
 
+def observe(state: EnvState) -> jax.Array:
+    max_total_food = GRID_SIZE * GRID_SIZE * MAX_FOOD_PER_TILE
+    # return observations as proportion of total
+    return jnp.array([
+        state.world.total_food / max_total_food,
+        state.foragers.population / MAX_POPULATION,
+        state.foragers.mean_energy / BREED_ENERGY,
+    ], dtype=jnp.float32)
+
+def init_env_state(key: jax.Array) -> EnvState:
+    food_key, forager_key = jax.random.split(key)
+    food = jax.random.randint(
+        food_key, (GRID_SIZE, GRID_SIZE), 0, int(MAX_FOOD_PER_TILE) + 1
+    ).astype(float)
+    world = World(food, jnp.zeros((GRID_SIZE, GRID_SIZE)))
+    return EnvState(init_foragers(forager_key), world, jnp.int32(0))
+
+
 # Initial base for RL -> returns new state, obs, rewards and done.
-def env_step(state: EnvState, action: float, step_key) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
+def env_step(state: EnvState, action: jax.Array, step_key: jax.Array) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
 
     # setup all random keys needed. Each consumer of randomness gets its own
     # branch so the food draw and the movement draw stay independent.
@@ -202,41 +232,50 @@ def env_step(state: EnvState, action: float, step_key) -> tuple[EnvState, jax.Ar
     foragers = breed(foragers)
 
     # Update the state
-    new_state = EnvState(foragers, world)
+    new_state = EnvState(foragers, world, state.step_count + 1)
 
-    # Finished without population dying
-    return new_state, jnp.zeros(1), jnp.zeros(1), jnp.zeros(1) 
+    # Reward -> 1 for each step kept in band. jnp.where, not a Python
+    # conditional: both branches are evaluated and selected elementwise.
+    in_band = foragers.population_in_band(POP_BAND_LOW, POP_BAND_HIGH)
+    reward = jnp.where(in_band, 1.0, 0.0)
+
+    obs = observe(new_state)
+    # Extinction is terminal; the step cap is what gives scan a fixed length.
+    done = (foragers.population == 0) | (new_state.step_count >= EPISODE_STEPS)
+
+    return new_state, obs, reward, done
 
 if __name__ == "__main__":
     key = jax.random.key(0)
 
-    key, food_rand = jax.random.split(key)
-    initial_food = jax.random.randint(food_rand, (GRID_SIZE, GRID_SIZE), 0, 6, dtype=int)
-    initial_poison = jnp.zeros((GRID_SIZE, GRID_SIZE))
-    world = World(initial_food, initial_poison)
-
-    # Init some random foragers for using vmap
-    key, foragers_rand = jax.random.split(key)
-    # Put INITIAL_POPULATION foragers on the grid
-    foragers = init_foragers(key)
-
-    env_state = EnvState(foragers, world)
+    key, init_key = jax.random.split(key)
+    env_state = init_env_state(init_key)
 
 
     # Simulate N steps. Order: move -> count -> eat -> clear food -> breed.
     # Breeding last so newborns do not dilute the food share on their tile this
     # step; they move and eat on the next one.
-    print(f"{'step':>5} {'pop':>5} {'mean_energy':>12} {'food':>10}")
-    for i in range(SIMULATION_STEPS):
+    total_reward = 0.0
+    print(f"{'step':>5} {'pop':>5} {'mean_energy':>12} {'food':>10} {'reward':>8}")
+    for i in range(EPISODE_STEPS):
         key, step_key = jax.random.split(key)
-        env_state, obs, rewards, done = env_step(env_state, 0, step_key)
+        env_state, obs, reward, done = env_step(env_state, 4, step_key)
 
-        if i % 10 == 0 or env_state.foragers.population == 0:
+        total_reward += float(reward)
+
+        if i % 10 == 0 or bool(done):
             print(f"{i:>5} {int(env_state.foragers.population):>5} "
                     f"{float(env_state.foragers.mean_energy):>12.2f} "
-                    f"{float(env_state.world.total_food):>10.1f}")
-        if env_state.foragers.population == 0:
-            print("extinct")
+                    f"{float(env_state.world.total_food):>10.1f} "
+                    f"{total_reward:>8.0f}")
+        # done covers both extinction and the episode cap.
+        if bool(done):
+            if env_state.foragers.population == 0:
+                print("extinct")
+            break
+
+    print(f"\nreward: {total_reward:.0f}/{EPISODE_STEPS} steps in band "
+          f"{POP_BAND_LOW}-{POP_BAND_HIGH}")
 
 
 

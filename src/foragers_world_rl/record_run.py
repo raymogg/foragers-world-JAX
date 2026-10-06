@@ -18,21 +18,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import jax
-import jax.numpy as jnp
 
 from foragers_world_rl.recorder import Recorder
 from foragers_world_rl.world import (
     BREED_ENERGY,
+    EPISODE_STEPS,
     FOOD_REGROWTH_RATE,
     GRID_SIZE,
-    MAX_FOOD_PER_TILE,
-    MOVE_COSTS,
     INITIAL_POPULATION,
+    MAX_FOOD_PER_TILE,
     MAX_POPULATION,
-    EnvState,
-    World,
+    MOVE_COSTS,
+    POP_BAND_HIGH,
+    POP_BAND_LOW,
     env_step,
-    init_foragers,
+    init_env_state,
 )
 
 
@@ -41,17 +41,8 @@ def record(
 ) -> Path:
     key = jax.random.key(seed)
 
-    key, food_key = jax.random.split(key)
-    initial_food = jax.random.randint(
-        food_key, (GRID_SIZE, GRID_SIZE), 0, int(MAX_FOOD_PER_TILE) + 1
-    ).astype(float)
-    initial_poison = jnp.zeros((GRID_SIZE, GRID_SIZE))
-    world = World(initial_food, initial_poison)
-
-    key, forager_key = jax.random.split(key)
-    foragers = init_foragers(forager_key)
-
-    state = EnvState(foragers, world)
+    key, init_key = jax.random.split(key)
+    state = init_env_state(init_key)
 
     rec = Recorder(
         grid_size=GRID_SIZE,
@@ -67,20 +58,32 @@ def record(
             "max_food_per_tile": MAX_FOOD_PER_TILE,
             "move_costs": [float(c) for c in MOVE_COSTS],
             "action": action,
+            "move_cost": float(MOVE_COSTS[action]),
+            "pop_band": [POP_BAND_LOW, POP_BAND_HIGH],
+            "episode_steps": EPISODE_STEPS,
         },
     )
     # frame 0 = the initial state
     rec.snapshot(state.world, state.foragers)
 
+    # No agent yet, so the action is held fixed for the whole run.
+    total_reward = 0.0
     for _ in range(steps):
         key, step_key = jax.random.split(key)
-        # No agent yet, so hold the action fixed at the cheapest movement cost.
-        state, _obs, _reward, _done = env_step(state, action, step_key)
+        state, _obs, reward, done = env_step(state, action, step_key)
+        total_reward += float(reward)
 
         rec.snapshot(state.world, state.foragers)
 
-        if stop_when_extinct and state.foragers.population == 0:
+        if stop_when_extinct and bool(done):
             break
+
+    in_band_steps = int(total_reward)
+    print(
+        f"reward: {total_reward:.0f} "
+        f"({in_band_steps}/{len(rec.frames) - 1} steps in band "
+        f"{POP_BAND_LOW}-{POP_BAND_HIGH})"
+    )
 
     path = rec.save(out)
     s = rec.to_dict()["summary"]
