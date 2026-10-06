@@ -23,7 +23,10 @@ import jax.numpy as jnp
 from foragers_world_rl.recorder import Recorder
 from foragers_world_rl.world import (
     BREED_ENERGY,
+    FOOD_REGROWTH_RATE,
     GRID_SIZE,
+    MAX_FOOD_PER_TILE,
+    MOVE_COSTS,
     INITIAL_POPULATION,
     MAX_POPULATION,
     EnvState,
@@ -33,12 +36,14 @@ from foragers_world_rl.world import (
 )
 
 
-def record(steps: int, seed: int, out: Path, stop_when_extinct: bool = True) -> Path:
+def record(
+    steps: int, seed: int, out: Path, stop_when_extinct: bool = True, action: int = 0
+) -> Path:
     key = jax.random.key(seed)
 
     key, food_key = jax.random.split(key)
     initial_food = jax.random.randint(
-        food_key, (GRID_SIZE, GRID_SIZE), 0, 5
+        food_key, (GRID_SIZE, GRID_SIZE), 0, int(MAX_FOOD_PER_TILE) + 1
     ).astype(float)
     initial_poison = jnp.zeros((GRID_SIZE, GRID_SIZE))
     world = World(initial_food, initial_poison)
@@ -58,7 +63,10 @@ def record(steps: int, seed: int, out: Path, stop_when_extinct: bool = True) -> 
             "max_population": MAX_POPULATION,
             "initial_population": INITIAL_POPULATION,
             "breed_energy": BREED_ENERGY,
-            "food_regrowth": False,
+            "food_regrowth": FOOD_REGROWTH_RATE,
+            "max_food_per_tile": MAX_FOOD_PER_TILE,
+            "move_costs": [float(c) for c in MOVE_COSTS],
+            "action": action,
         },
     )
     # frame 0 = the initial state
@@ -66,8 +74,8 @@ def record(steps: int, seed: int, out: Path, stop_when_extinct: bool = True) -> 
 
     for _ in range(steps):
         key, step_key = jax.random.split(key)
-        # No agent yet, so the action is a placeholder env_step ignores.
-        state, _obs, _reward, _done = env_step(state, 0, step_key)
+        # No agent yet, so hold the action fixed at the cheapest movement cost.
+        state, _obs, _reward, _done = env_step(state, action, step_key)
 
         rec.snapshot(state.world, state.foragers)
 
@@ -90,6 +98,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--action", type=int, default=0, help="fixed action index (MOVE_COSTS)"
+    )
     ap.add_argument("--out", type=Path, default=Path("runs/run.json"))
     ap.add_argument(
         "--run-to-end",
@@ -97,4 +108,6 @@ if __name__ == "__main__":
         help="keep going after extinction instead of stopping",
     )
     a = ap.parse_args()
-    record(a.steps, a.seed, a.out, stop_when_extinct=not a.run_to_end)
+    record(
+        a.steps, a.seed, a.out, stop_when_extinct=not a.run_to_end, action=a.action
+    )

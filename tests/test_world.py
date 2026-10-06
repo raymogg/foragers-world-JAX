@@ -21,18 +21,38 @@ import jax.numpy as jnp
 from foragers_world_rl.recorder import Recorder
 from foragers_world_rl.world import (
     BREED_ENERGY,
+    MOVE_COSTS,
+    FOOD_REGROWTH_RATE,
     GRID_SIZE,
+    MAX_FOOD_PER_TILE,
     MAX_POPULATION,
     Foragers,
     World,
     breed,
     eat_all,
     init_foragers,
+    regrow_food,
     step_all,
     zero_eaten_food,
 )
 
 
+
+
+# The baseline movement cost. These tests check properties that hold at any
+# cost, so they pin one rather than depending on whichever action is first.
+TEST_MOVE_COST = 1.0
+
+
+def _world(food, poison=None):
+    """Build a World from a food grid, defaulting poison to empty.
+
+    Keeps the tests from caring about fields they do not exercise, so adding a
+    field to World does not mean editing every call site.
+    """
+    if poison is None:
+        poison = jnp.zeros((GRID_SIZE, GRID_SIZE))
+    return World(food, poison)
 
 
 def _foragers(positions, energies, alives):
@@ -68,7 +88,7 @@ def test_food_shared_evenly():
 
     food = jnp.zeros((GRID_SIZE, GRID_SIZE)).at[SHARED].set(FOOD_THERE)
     food = food.at[7, 1].set(5.0)
-    world = World(food)
+    world = _world(food)
 
     per_grid = foragers.per_position_count()
     assert jnp.allclose(per_grid[SHARED], 3.0), "dead forager counted in divisor"
@@ -93,14 +113,14 @@ def test_energy_conservation():
     """
     key = jax.random.key(0)
     key, k = jax.random.split(key)
-    world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
+    world = _world(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
     key, k = jax.random.split(key)
     foragers = init_foragers(k)
 
     for _ in range(10):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        foragers = step_all(world, foragers, step_keys, TEST_MOVE_COST)
 
         food_before = world.food.sum()
         energy_before = jnp.where(foragers.alive, foragers.energy, 0.0).sum()
@@ -129,14 +149,14 @@ def test_population_only_declines_without_food():
     computed or propagated wrongly.
     """
     key = jax.random.key(0)
-    world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
     foragers = init_foragers(key)
 
     prev = foragers.population
     for _ in range(100):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        foragers = step_all(world, foragers, step_keys, TEST_MOVE_COST)
         now = foragers.population
         assert now <= prev, f"population rose from {prev} to {now} with no food"
         prev = now
@@ -152,7 +172,7 @@ def test_dead_foragers_stay_dead():
     """
     key = jax.random.key(1)
     key, k = jax.random.split(key)
-    world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
+    world = _world(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
     foragers = init_foragers(key)
 
     # Kill slot 0 outright.
@@ -164,7 +184,7 @@ def test_dead_foragers_stay_dead():
     for _ in range(20):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        foragers = step_all(world, foragers, step_keys, TEST_MOVE_COST)
         per_grid = foragers.per_position_count()
         foragers = eat_all(world, foragers, per_grid)
         world = zero_eaten_food(world, per_grid)
@@ -175,13 +195,13 @@ def test_foragers_stay_on_grid():
     """Positions never leave the grid. Catches a broken clip in the move step."""
     key = jax.random.key(2)
     key, k = jax.random.split(key)
-    world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
+    world = _world(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
     foragers = init_foragers(key)
 
     for _ in range(50):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        foragers = step_all(world, foragers, step_keys, TEST_MOVE_COST)
         assert foragers.pos.min() >= 0, "position went negative"
         assert foragers.pos.max() < GRID_SIZE, "position exceeded grid"
 
@@ -195,7 +215,7 @@ def test_shapes_are_stable():
     """
     key = jax.random.key(3)
     key, k = jax.random.split(key)
-    world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
+    world = _world(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
     foragers = init_foragers(key)
 
     expected = jax.tree.map(lambda a: a.shape, foragers)
@@ -204,7 +224,7 @@ def test_shapes_are_stable():
     for i in range(10):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        foragers = step_all(world, foragers, step_keys, TEST_MOVE_COST)
         per_grid = foragers.per_position_count()
         foragers = eat_all(world, foragers, per_grid)
         world = zero_eaten_food(world, per_grid)
@@ -220,13 +240,13 @@ def test_no_nans():
     """No NaN or inf anywhere, ever. Usually a divide-by-zero in the sharing."""
     key = jax.random.key(4)
     key, k = jax.random.split(key)
-    world = World(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
+    world = _world(jax.random.uniform(k, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=4.0))
     foragers = init_foragers(key)
 
     for i in range(50):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        foragers = step_all(world, foragers, step_keys, TEST_MOVE_COST)
         per_grid = foragers.per_position_count()
         foragers = eat_all(world, foragers, per_grid)
         world = zero_eaten_food(world, per_grid)
@@ -243,7 +263,7 @@ def test_randomness_actually_advances():
     have visited more than one position.
     """
     key = jax.random.key(5)
-    world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
     foragers = init_foragers(key)
     foragers = foragers._replace(energy=jnp.full((MAX_POPULATION,), 1e6))
 
@@ -251,7 +271,7 @@ def test_randomness_actually_advances():
     for _ in range(20):
         key, step_key = jax.random.split(key)
         step_keys = jax.random.split(step_key, MAX_POPULATION)
-        foragers = step_all(world, foragers, step_keys)
+        foragers = step_all(world, foragers, step_keys, TEST_MOVE_COST)
         seen.append(foragers.pos[0].tolist())
 
     assert len(set(map(tuple, seen))) > 1, (
@@ -411,7 +431,7 @@ def test_recorder_frame_matches_state():
         energies=[10.0, 7.5, 3.0],
         alives=[True, False, True],
     )
-    world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)).at[1, 2].set(4.0))
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)).at[1, 2].set(4.0))
 
     rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION)
     rec.snapshot(world, foragers)
@@ -432,7 +452,7 @@ def test_recorder_frame_matches_state():
 def test_recorder_handles_extinction():
     """Zero living foragers must not divide by zero in mean_energy."""
     foragers = _foragers(positions=[[0, 0]], energies=[0.0], alives=[False])
-    world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
 
     rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION)
     rec.snapshot(world, foragers)
@@ -448,7 +468,7 @@ def test_recorder_round_trips_to_json():
     import tempfile
 
     foragers = _foragers(positions=[[2, 2]], energies=[8.0], alives=[True])
-    world = World(jnp.zeros((GRID_SIZE, GRID_SIZE)).at[2, 2].set(1.0))
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)).at[2, 2].set(1.0))
 
     rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION, label="test")
     rec.snapshot(world, foragers)
@@ -464,6 +484,143 @@ def test_recorder_round_trips_to_json():
     assert loaded["summary"]["steps"] == 2
     assert loaded["frames"][0]["step"] == 0
     assert loaded["frames"][1]["step"] == 1, "step numbers must increment"
+# ---------------------------------------------------------------- food regrowth
+
+
+def test_regrowth_never_exceeds_the_cap():
+    """MAX_FOOD_PER_TILE is a hard ceiling, including on already-full tiles.
+
+    Without the cap, food grows without bound and the population just pins at
+    MAX_POPULATION -- there is no carrying capacity for an agent to act against.
+    """
+    # Start every tile AT the cap, so any leak shows up immediately.
+    world = _world(jnp.full((GRID_SIZE, GRID_SIZE), MAX_FOOD_PER_TILE))
+
+    key = jax.random.key(0)
+    for _ in range(20):
+        key, sub = jax.random.split(key)
+        world = regrow_food(world, sub)
+        assert float(world.food.max()) <= MAX_FOOD_PER_TILE + 1e-6, (
+            f"food reached {float(world.food.max())}, cap is {MAX_FOOD_PER_TILE}"
+        )
+
+
+def test_regrowth_only_ever_adds_food():
+    """Regrowth is monotonic. It is the only inflow; grazing is the only outflow."""
+    key = jax.random.key(1)
+    key, food_key = jax.random.split(key)
+    food = jax.random.uniform(
+        food_key, (GRID_SIZE, GRID_SIZE), minval=0.0, maxval=MAX_FOOD_PER_TILE
+    )
+    world = _world(food)
+
+    key, sub = jax.random.split(key)
+    new_world = regrow_food(world, sub)
+
+    assert bool(jnp.all(new_world.food >= world.food)), "regrowth removed food somewhere"
+
+
+def test_regrowth_revives_grazed_tiles():
+    """A tile grazed to zero must be able to come back.
+
+    This is the reason regrowth is additive rather than proportional: under
+    `food * (1 + r)` a zeroed tile stays zero forever and the map turns to
+    permanent desert.
+    """
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+
+    key = jax.random.key(2)
+    for _ in range(50):
+        key, sub = jax.random.split(key)
+        world = regrow_food(world, sub)
+
+    assert float(world.food.sum()) > 0.0, "an empty grid never regrew any food"
+
+
+def test_regrowth_leaves_poison_alone():
+    """regrow_food rebuilds the World, so it must carry poison through untouched."""
+    poison = jnp.zeros((GRID_SIZE, GRID_SIZE)).at[3, 4].set(2.0)
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)), poison=poison)
+
+    new_world = regrow_food(world, jax.random.key(3))
+
+    assert bool(jnp.array_equal(new_world.poison, poison)), "poison grid was modified"
+
+
+def test_regrowth_is_keyed():
+    """Same key -> same growth; different key -> different growth.
+
+    The second half is the real check: reusing one key across steps would make
+    the same tiles regrow every time, which looks plausible but is not random.
+    """
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+
+    a = regrow_food(world, jax.random.key(7)).food
+    a_again = regrow_food(world, jax.random.key(7)).food
+    b = regrow_food(world, jax.random.key(8)).food
+
+    assert bool(jnp.array_equal(a, a_again)), "same key gave different food"
+    assert not bool(jnp.array_equal(a, b)), "different keys gave identical food"
+
+
+def test_regrowth_rate_is_the_expected_fraction():
+    """Bernoulli(FOOD_REGROWTH_RATE): the share of tiles that grow matches the knob.
+
+    Ties the constant to observable behaviour, so changing the knob changes the
+    world rather than silently doing nothing.
+    """
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+    new_food = regrow_food(world, jax.random.key(11)).food
+
+    grew = float((new_food > 0).mean())
+    # GRID_SIZE**2 samples, so the sample fraction is tight around the rate.
+    assert abs(grew - FOOD_REGROWTH_RATE) < 0.03, (
+        f"{grew:.3f} of tiles grew, expected ~{FOOD_REGROWTH_RATE}"
+    )
+    # Bernoulli adds at most 1 per tile per step.
+    assert float(new_food.max()) <= 1.0 + 1e-6, "a tile gained more than 1 food"
+
+
+# ------------------------------------------------------------- the action lever
+
+
+def test_move_costs_is_a_jax_array():
+    """MOVE_COSTS[action] must work on a TRACED action, not just a Python int.
+
+    A plain Python list indexes fine with a literal and raises
+    TracerIntegerConversionError the moment env_step is jitted -- which is
+    every step once PPO drives it. Indexing a jnp array compiles to a gather.
+    """
+    assert isinstance(MOVE_COSTS, jax.Array), (
+        f"MOVE_COSTS is {type(MOVE_COSTS).__name__}; a Python list breaks under jit"
+    )
+
+
+def test_higher_move_cost_drains_energy_faster():
+    """The action has to actually move the needle, in the right direction.
+
+    If the costs are too close together the agent's choices barely matter and
+    no amount of training will produce a policy.
+    """
+    key = jax.random.key(0)
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+    step_keys = jax.random.split(key, MAX_POPULATION)
+
+    foragers = _foragers(
+        positions=[[5, 5]] * 4, energies=[10.0] * 4, alives=[True] * 4
+    )
+
+    totals = []
+    for cost in MOVE_COSTS:
+        after = step_all(world, foragers, step_keys, cost)
+        totals.append(float(jnp.where(after.alive, after.energy, 0.0).sum()))
+
+    assert totals == sorted(totals, reverse=True), (
+        f"energy left after one step {totals} is not decreasing in move cost"
+    )
+    assert totals[0] > totals[-1], "cheapest and dearest action cost the same"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

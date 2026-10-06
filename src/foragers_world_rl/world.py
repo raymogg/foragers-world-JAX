@@ -1,15 +1,17 @@
 import jax, jax.numpy as jnp
 from typing import NamedTuple
-from enum import Enum
 
 # keep small for initial testing
 MAX_POPULATION = 256
 INITIAL_POPULATION = 16
-GRID_SIZE = 100
+GRID_SIZE = 30
 SIMULATION_STEPS = 1000
+MAX_FOOD_PER_TILE = 5.0
+FOOD_REGROWTH_RATE = 0.2
+
 # Min energy to breed. A parent pays energy/2 + 1, so at the threshold it keeps 1.
 BREED_ENERGY = 4.0
-MOVE_COSTS = jnp.array([1.0, 3.0, 5.0])
+MOVE_COSTS = jnp.arange(0, 3, 0.25)
 
 class World(NamedTuple):
     food: jax.Array #(X, Y) float
@@ -114,6 +116,16 @@ def zero_eaten_food(world: World, per_grid_count: jax.Array) -> tuple[World]:
     new_world = World(new_food, world.poison)
     return new_world
 
+def regrow_food(world: World, key: jax.Array) -> tuple[World]:
+    # uniform 0, 1 -> bernouli food_regrowth_rate
+    additional_food = (jax.random.uniform(key, (GRID_SIZE, GRID_SIZE)) < FOOD_REGROWTH_RATE).astype(float)
+
+    # apply new food with max cap
+    new_food = jnp.minimum(additional_food + world.food, MAX_FOOD_PER_TILE)
+
+    new_world = World(new_food, world.poison)
+    return new_world
+
 # asexual breeding
 def breed(forager: Foragers) -> Foragers:
     # (MAX_POPULATION,) bool
@@ -165,19 +177,27 @@ def breed(forager: Foragers) -> Foragers:
 step_all = jax.vmap(step, in_axes=(None, 0, 0, None))
 eat_all = jax.vmap(eat, in_axes=(None, 0, None))
 zero_all = jax.vmap(zero_eaten_food, in_axes=(0, 0))
+regrow_all_food = jax.vmap(regrow_food, in_axes=(0, None))
 
 # Initial base for RL -> returns new state, obs, rewards and done.
 def env_step(state: EnvState, action: float, step_key) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
+
+    # setup all random keys needed. Each consumer of randomness gets its own
+    # branch so the food draw and the movement draw stay independent.
+    move_key, food_key = jax.random.split(step_key)
+    step_keys = jax.random.split(move_key, MAX_POPULATION)
+
     # agent action - currently only updates forager movement cost
     new_move_cost = MOVE_COSTS[action]
 
-    # world = World(world.food, world.poison, new_move_cost)
-    step_keys = jax.random.split(step_key, MAX_POPULATION)
     foragers = step_all(state.world, state.foragers, step_keys, new_move_cost)
 
     per_grid = foragers.per_position_count()
     foragers = eat_all(state.world, foragers, per_grid)
     world = zero_all(state.world, per_grid)
+
+    # regrow food using bernouli(FOOD_REGROWTH_RATE)
+    world = regrow_food(world, food_key)
 
     foragers = breed(foragers)
 
@@ -191,7 +211,7 @@ if __name__ == "__main__":
     key = jax.random.key(0)
 
     key, food_rand = jax.random.split(key)
-    initial_food = jax.random.randint(food_rand, (GRID_SIZE, GRID_SIZE), 0, 5, dtype=int)
+    initial_food = jax.random.randint(food_rand, (GRID_SIZE, GRID_SIZE), 0, 6, dtype=int)
     initial_poison = jnp.zeros((GRID_SIZE, GRID_SIZE))
     world = World(initial_food, initial_poison)
 
