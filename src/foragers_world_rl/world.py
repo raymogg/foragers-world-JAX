@@ -244,3 +244,37 @@ def env_step(state: EnvState, action: jax.Array, step_key: jax.Array) -> tuple[E
     done = (foragers.population == 0) | (new_state.step_count >= EPISODE_STEPS)
 
     return new_state, obs, reward, done
+
+
+if __name__ == "__main__":
+    # A bare look at the environment: one episode, one fixed action, no agent.
+    # For policies, scoring and recording, use agent.py.
+    DEMO_ACTION = 6
+
+    key = jax.random.key(0)
+    key, init_key = jax.random.split(key)
+    state = init_env_state(init_key)
+
+    print(f"grid {GRID_SIZE}x{GRID_SIZE}, band {POP_BAND_LOW}-{POP_BAND_HIGH}, "
+          f"move cost {float(MOVE_COSTS[DEMO_ACTION]):g} (action {DEMO_ACTION})")
+    print(f"{'step':>5} {'pop':>5} {'energy':>8} {'food':>8} {'return':>8}")
+
+    total_reward = 0.0
+    for i in range(EPISODE_STEPS):
+        key, step_key = jax.random.split(key)
+        state, obs, reward, done = env_step(state, DEMO_ACTION, step_key)
+        total_reward += float(reward)
+
+        if i % 25 == 0 or bool(done):
+            print(f"{i:>5} {int(state.foragers.population):>5} "
+                  f"{float(state.foragers.mean_energy):>8.2f} "
+                  f"{float(state.world.total_food):>8.0f} "
+                  f"{total_reward:>8.0f}")
+        # done covers extinction and the episode cap.
+        if bool(done):
+            if state.foragers.population == 0:
+                print("extinct")
+            break
+
+    print(f"\nreturn {total_reward:.0f}/{EPISODE_STEPS} "
+          f"({100 * total_reward / EPISODE_STEPS:.0f}% of steps in band)")

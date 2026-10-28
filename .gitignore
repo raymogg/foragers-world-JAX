@@ -13,4 +13,6 @@ wheels/
 coding_spec.md
 jax_rl_project_spec.md
 
-runs/
+# Recorded trajectories are large; one small sample is checked in.
+runs/*
+!runs/sample.json

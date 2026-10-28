@@ -144,7 +144,9 @@ def evaluate(policy_fn, params, seed: int = 0, worlds: int = 256) -> dict:
 # ---------------------------------------------------------------------- recording
 
 
-def record(policy_fn, params, seed: int, out: Path, label: str) -> Path:
+def record(
+    policy_fn, params, seed: int, out: Path, label: str, steps: int = EPISODE_STEPS
+) -> Path:
     """Replay one episode eagerly, snapshotting each step for the web viewer.
 
     Deliberately outside scan: the Recorder builds Python lists and dicts, so
@@ -175,7 +177,7 @@ def record(policy_fn, params, seed: int, out: Path, label: str) -> Path:
     rec.snapshot(state.world, state.foragers)  # frame 0 = initial state
 
     total_reward = 0.0
-    for _ in range(EPISODE_STEPS):
+    for _ in range(steps):
         key, step_key = jax.random.split(key)
         act_key, env_key = jax.random.split(step_key)
 
@@ -194,7 +196,7 @@ def record(policy_fn, params, seed: int, out: Path, label: str) -> Path:
         f"wrote {path} ({s['steps']} frames, peak pop {s['peak_population']}, "
         f"final {s['final_population']}{', extinct' if s['extinct'] else ''})"
     )
-    print(f"  return: {total_reward:.0f}/{EPISODE_STEPS}")
+    print(f"  return: {total_reward:.0f}/{steps}")
     return path
 
 
@@ -219,6 +221,12 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--worlds", type=int, default=256, help="parallel episodes")
     ap.add_argument("--record", type=Path, help="also save a trajectory JSON")
+    ap.add_argument(
+        "--record-steps",
+        type=int,
+        default=EPISODE_STEPS,
+        help="steps to record; fewer keeps the JSON small",
+    )
     a = ap.parse_args()
 
     if a.policy is None:
@@ -250,7 +258,7 @@ def main() -> None:
     fn, params = POLICIES[a.policy]
     report(a.policy, evaluate(fn, params, seed=a.seed, worlds=a.worlds))
     if a.record:
-        record(fn, params, a.seed, a.record, a.policy)
+        record(fn, params, a.seed, a.record, a.policy, steps=a.record_steps)
 
 
 if __name__ == "__main__":
