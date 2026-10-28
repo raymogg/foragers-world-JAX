@@ -1,0 +1,179 @@
+{
+  "name": "band_sweep",
+  "description": "Basic PPO (3 global observations, 12 discrete move costs) trained separately\non four target population bands: a wide default, a tight band, one near the\nfloor and one near the ceiling. Compared against the best fixed action and\nuniform random on the same 256 evaluation worlds.",
+  "config_file": "experiments/band_sweep.toml",
+  "git": {
+    "commit": "3340172749091dec95ae2bc306f1926ac85f1ff4",
+    "dirty": true,
+    "diff_file": "git.diff"
+  },
+  "versions": {
+    "jax": "0.6.2",
+    "optax": "0.2.8",
+    "numpy": "2.2.6",
+    "python": "3.10.20"
+  },
+  "env": {
+    "grid_size": 32,
+    "max_population": 256,
+    "initial_population": 16,
+    "episode_steps": 500,
+    "breed_energy": 4.0,
+    "max_food_per_tile": 5.0,
+    "food_regrowth_rate": 0.2,
+    "move_costs": [
+      0.0,
+      0.25,
+      0.5,
+      0.75,
+      1.0,
+      1.25,
+      1.5,
+      1.75,
+      2.0,
+      2.25,
+      2.5,
+      2.75
+    ]
+  },
+  "bands": {
+    "wide": [
+      80,
+      140
+    ],
+    "tight": [
+      75,
+      85
+    ],
+    "floor": [
+      0,
+      30
+    ],
+    "ceiling": [
+      120,
+      154
+    ]
+  },
+  "train": {
+    "seed": 0,
+    "skipped": false,
+    "ppo": {
+      "num_envs": 256,
+      "num_steps": 128,
+      "total_timesteps": 5000000,
+      "update_epochs": 4,
+      "num_minibatches": 4,
+      "gamma": 0.99,
+      "gae_lambda": 0.95,
+      "clip_eps": 0.2,
+      "ent_coef": 0.01,
+      "vf_coef": 0.5,
+      "max_grad_norm": 0.5,
+      "lr": 0.00025,
+      "anneal_lr": true,
+      "hidden": 64
+    }
+  },
+  "eval": {
+    "seed": 0,
+    "worlds": 256,
+    "policies": [
+      "ppo_greedy",
+      "ppo_sampled",
+      "best_fixed",
+      "random"
+    ]
+  },
+  "best_fixed": {
+    "wide": "fixed:6",
+    "tight": "fixed:6",
+    "floor": "fixed:7",
+    "ceiling": "fixed:5"
+  },
+  "recorded": [
+    {
+      "band": "wide",
+      "policy": "ppo_greedy",
+      "which": "median",
+      "world": 5,
+      "file": "episodes/wide__ppo_greedy__median.json"
+    },
+    {
+      "band": "wide",
+      "policy": "ppo_greedy",
+      "which": "worst",
+      "world": 41,
+      "file": "episodes/wide__ppo_greedy__worst.json"
+    },
+    {
+      "band": "wide",
+      "policy": "best_fixed",
+      "which": "median",
+      "world": 125,
+      "file": "episodes/wide__best_fixed__median.json"
+    },
+    {
+      "band": "tight",
+      "policy": "ppo_greedy",
+      "which": "median",
+      "world": 48,
+      "file": "episodes/tight__ppo_greedy__median.json"
+    },
+    {
+      "band": "tight",
+      "policy": "ppo_greedy",
+      "which": "worst",
+      "world": 215,
+      "file": "episodes/tight__ppo_greedy__worst.json"
+    },
+    {
+      "band": "tight",
+      "policy": "best_fixed",
+      "which": "median",
+      "world": 45,
+      "file": "episodes/tight__best_fixed__median.json"
+    },
+    {
+      "band": "floor",
+      "policy": "ppo_greedy",
+      "which": "median",
+      "world": 9,
+      "file": "episodes/floor__ppo_greedy__median.json"
+    },
+    {
+      "band": "floor",
+      "policy": "ppo_greedy",
+      "which": "worst",
+      "world": 225,
+      "file": "episodes/floor__ppo_greedy__worst.json"
+    },
+    {
+      "band": "floor",
+      "policy": "best_fixed",
+      "which": "median",
+      "world": 215,
+      "file": "episodes/floor__best_fixed__median.json"
+    },
+    {
+      "band": "ceiling",
+      "policy": "ppo_greedy",
+      "which": "median",
+      "world": 7,
+      "file": "episodes/ceiling__ppo_greedy__median.json"
+    },
+    {
+      "band": "ceiling",
+      "policy": "ppo_greedy",
+      "which": "worst",
+      "world": 63,
+      "file": "episodes/ceiling__ppo_greedy__worst.json"
+    },
+    {
+      "band": "ceiling",
+      "policy": "best_fixed",
+      "which": "median",
+      "world": 59,
+      "file": "episodes/ceiling__best_fixed__median.json"
+    }
+  ]
+}

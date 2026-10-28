@@ -4,8 +4,10 @@ from typing import NamedTuple
 # keep small for initial testing
 MAX_POPULATION = 256
 INITIAL_POPULATION = 16
-# target range for RL
+# Default target range for RL. env_step takes the band as an argument so
+# experiments can vary it without recompiling; this is what it falls back to.
 POP_BAND_LOW, POP_BAND_HIGH = 80, 140
+DEFAULT_BAND = (POP_BAND_LOW, POP_BAND_HIGH)
 
 # must be 2^n
 GRID_SIZE = 32
@@ -146,10 +148,8 @@ def breed(forager: Foragers) -> Foragers:
     # compute which slots are currently free
     free = ~forager.alive
 
-    # array of free slots up to slot n
-    free_rank = jnp.cumsum(free) - 1
     # array of eligble parents up to slot n
-    parent_rank = jnp.cumsum(can_breed) - 1 
+    parent_rank = jnp.cumsum(can_breed) - 1
 
     # if more parents want to breed than slots available, prevent
     # parents after total free slots from breeding
@@ -157,30 +157,21 @@ def breed(forager: Foragers) -> Foragers:
     # will build up energy if continously blocked from breeding
     is_parent = can_breed & (parent_rank < free.sum())
 
-    # gets_child[i, j] = does free slot i take forager j's child?
-    gets_child = (
-        free[:, None] #(N, 1)
-        & is_parent[None, :] #(1, N)
-        & (free_rank[:, None] == parent_rank[None, :]) #(N, N)
-    )
-
-    # Reduce along axis 1 (collapse the parent axis) -> one answer per SLOT.
-    # (N, )
-    # which slot receives a child
-    receives = gets_child.any(axis=1)
-    # which parent goes with which slot
-    from_parent = jnp.where(receives, jnp.argmax(gets_child, axis=1), -1)
+    # The k-th parent's child goes into the k-th free slot.
+    # free_slots[k] = index of the k-th free slot, padded with MAX_POPULATION.
+    # `size` fixes the output shape so this works under jit.
+    free_slots = jnp.nonzero(free, size=MAX_POPULATION, fill_value=MAX_POPULATION)[0]
+    # Non-parents point out of bounds, and mode="drop" discards those writes.
+    child_slot = jnp.where(is_parent, free_slots[parent_rank], MAX_POPULATION)
 
     # any parent that breeds looses half its energy
     new_energy = jnp.where(is_parent, forager.energy / 2, forager.energy)
 
-    # only update slots where they are receiving a child
-    new_pos = jnp.where(receives[:, None], forager.pos[from_parent], forager.pos)
-    # Children take half the parent's ORIGINAL energy, which is what new_energy
-    # already holds at the parent's slot.
-    new_energy = jnp.where(receives, new_energy[from_parent], new_energy)
-    # any slot that received a child is now alive
-    new_alive = forager.alive | receives
+    # Scatter each parent into its child's slot. Children take half the
+    # parent's ORIGINAL energy, which is what new_energy already holds.
+    new_pos = forager.pos.at[child_slot].set(forager.pos, mode="drop")
+    new_energy = new_energy.at[child_slot].set(new_energy, mode="drop")
+    new_alive = forager.alive.at[child_slot].set(True, mode="drop")
 
     return Foragers(new_pos, new_energy, new_alive)
 
@@ -210,7 +201,10 @@ def init_env_state(key: jax.Array) -> EnvState:
 
 
 # Initial base for RL -> returns new state, obs, rewards and done.
-def env_step(state: EnvState, action: jax.Array, step_key: jax.Array) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
+# `band` is (low, high), inclusive. Pass it as an array to keep it traced, so a
+# different band reuses the same compiled step.
+def env_step(state: EnvState, action: jax.Array, step_key: jax.Array,
+             band=DEFAULT_BAND) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
 
     # setup all random keys needed. Each consumer of randomness gets its own
     # branch so the food draw and the movement draw stay independent.
@@ -236,7 +230,7 @@ def env_step(state: EnvState, action: jax.Array, step_key: jax.Array) -> tuple[E
 
     # Reward -> 1 for each step kept in band. jnp.where, not a Python
     # conditional: both branches are evaluated and selected elementwise.
-    in_band = foragers.population_in_band(POP_BAND_LOW, POP_BAND_HIGH)
+    in_band = foragers.population_in_band(band[0], band[1])
     reward = jnp.where(in_band, 1.0, 0.0)
 
     obs = observe(new_state)

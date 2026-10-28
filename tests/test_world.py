@@ -462,6 +462,24 @@ def test_recorder_handles_extinction():
     assert rec.frames[0]["mean_energy"] == 0.0
 
 
+def test_recorder_records_action_and_reward():
+    """The initial frame has no action; later frames carry the one that made them.
+
+    The viewer reads `action` as an index into params["move_costs"], so it must
+    be a plain int, and must be absent (not 0) where no action was taken.
+    """
+    foragers = _foragers(positions=[[2, 2]], energies=[8.0], alives=[True])
+    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
+
+    rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION)
+    rec.snapshot(world, foragers)
+    rec.snapshot(world, foragers, action=jnp.int32(7), reward=jnp.float32(1.0))
+
+    assert "action" not in rec.frames[0] and "reward" not in rec.frames[0]
+    assert rec.frames[1]["action"] == 7 and type(rec.frames[1]["action"]) is int
+    assert rec.frames[1]["reward"] == 1.0
+
+
 def test_recorder_round_trips_to_json():
     """The saved file parses back and keeps the frames. Guards the viewer contract."""
     import json

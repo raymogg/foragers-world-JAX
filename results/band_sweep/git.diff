@@ -1,0 +1,792 @@
+diff --git a/AGENTS.txt b/AGENTS.txt
+index ead27bc..36da5bd 100644
+--- a/AGENTS.txt
++++ b/AGENTS.txt
+@@ -692,6 +692,22 @@ numbers masked-out elements too. Neither errors. The masks (`receives`,
+ `has_partner`, `free`) are the only way to tell a real answer from a default.
+ Making the junk an explicit -1 rather than a silent 0 is worth the line.
+ 
++THE MATRIX IS THE TEACHING VERSION, NOT THE FINAL ONE. Let them build it — it
++is the clearest way to see the pairing — but it is O(N^2) per step. Nothing
++errors and every answer is right; it is just slow. In this repo it was ~80% of
++rollout time (256 worlds x 500 steps: 8.3s -> 1.6s once replaced), and it went
++unnoticed until Level 10 because it was mistaken for jit recompilation. Have
++them time a batched rollout with `breed` stubbed out to find it. The O(N)
++version does the same pairing as a lookup plus a scatter:
++
++    free_slots = jnp.nonzero(free, size=N, fill_value=N)[0]  # k-th free slot
++    child_slot = jnp.where(is_parent, free_slots[parent_rank], N)
++    new_pos    = pos.at[child_slot].set(pos, mode="drop")    # N = out of bounds
++
++`size=` is what makes nonzero jit-able (fixed output shape), and the
++out-of-bounds index plus mode="drop" is the scatter version of the junk-index
++rule: the mask is folded into the index itself.
++
+ THE CIRCULAR ORDERING — this WILL bite them. The capacity gate needs
+ parent_rank, but parent_rank is a cumsum OF the parent mask. So:
+ 
+diff --git a/README.md b/README.md
+index 7394713..529eda5 100644
+--- a/README.md
++++ b/README.md
+@@ -10,7 +10,7 @@ it and they survive and breed.
+ 
+ **Built end-to-end in JAX:** pure functional `env_step`, `vmap` over the
+ population and over parallel worlds, `lax.scan` over episode steps, `jit`
+-throughout. 256 worlds x 500 steps runs in about a second.
++throughout. 256 worlds x 500 steps runs in about 1.5 seconds on CPU.
+ 
+ ## Setup
+ 
+@@ -24,11 +24,15 @@ uv sync
+ 
+ ```bash
+ uv run python src/foragers_world_rl/world.py   # one episode, fixed action
+-uv run python tests/test_world.py              # the test suite
++uv run python tests/test_world.py              # environment tests
++uv run python tests/test_ppo.py                # GAE / policy tests
+ 
+ uv run foragers-world-rl                       # list policies
+ uv run foragers-world-rl random                # score a policy over 256 worlds
+ uv run foragers-world-rl all                   # rank every policy
++
++uv run foragers-ppo                            # train PPO (~2 min on CPU), then score it
++uv run foragers-ppo --load runs/ppo_params.pkl --record runs/ppo.json
+ ```
+ 
+ `agent.py` holds the policies and the shared rollout. A policy is a pure
+@@ -51,7 +55,8 @@ from the batched evaluation: `--worlds` runs N episodes in parallel to get a
+ score, while `--record` writes one watchable trajectory.
+ 
+ The viewer is a single static HTML file with no build step. It shows the food
+-grid, foragers sized by energy, a population/food chart, and a scrubber. The
++grid, foragers sized by energy, a population/food chart with the target band,
++the move cost the policy chose at each step, and a scrubber. The
+ dropdown lists whatever is in `runs/`, or you can drag any trajectory JSON onto
+ the page — that works without the server too. `runs/sample.json` is checked in
+ as an example.
+@@ -86,21 +91,42 @@ Mean return over 256 parallel worlds, 500 steps, out of a possible 500:
+ 
+ | policy | return | extinct |
+ | --- | --- | --- |
++| **PPO, greedy** (5M steps, ~2 min CPU) | **496** | 0% |
++| PPO, sampled | 490 | 0% |
+ | best fixed action (cost 1.50) | 298 | 0% |
+ | second-best fixed (cost 1.25) | 247 | 0% |
+ | uniform random | 38 | 94% |
+ | anything above cost 2.0 | 0 | 100% |
+ 
+-Reproduce with `uv run foragers-world-rl all`.
++Reproduce the baselines with `uv run foragers-world-rl all` and PPO with
++`uv run foragers-ppo`. Every row is scored by the same `evaluate` (seed 0).
+ 
+ A learned policy has to beat **298** to show it is reacting to the observation
+ rather than settling on one action. The population oscillates under every fixed
+ action, so there is real headroom between 298 and 500.
+ 
++PPO closes nearly all of it: it learns a reactive controller that switches
++between costs 1.0 and 1.75 depending on the observation, and the few steps it
++misses are the start of the episode, while the population grows from 16 into
++the band. In other words, this version of the task is solved, and the
++interesting work now is making it harder (below).
++
++## PPO
++
++`ppo.py` follows [PureJaxRL](https://github.com/luchris429/purejaxrl)'s
++structure: one jitted `update` collects 128 steps from 256 worlds under
++`scan`/`vmap`, computes GAE with a reverse `scan`, and runs 4 epochs of
++minibatch PPO, all on device. The network is a hand-written MLP (a dict of
++arrays) and the optimiser is optax. Two choices worth knowing about:
++
++- **Truncation is not death.** Extinction is terminal, but hitting the 500-step
++  limit bootstraps from the value of the final observation: the observation has
++  no clock in it, so the critic cannot see an end coming.
++- **Rewards are scaled by `1 - gamma`** during training, so value targets sit in
++  [0, 1] and PureJaxRL's value-clipping range of 0.2 is sensible.
++
+ ## Not built yet
+ 
+-- **PPO.** The policy interface and the batched rollout are in place; the
+-  learning is not. This is the next piece of work.
+ - Heritable traits (speed, vision) with mutation
+ - Spatial actions — poison or plant food in one region rather than a global knob.
+   `World.poison` exists as a field and is carried through untouched; nothing
+diff --git a/pyproject.toml b/pyproject.toml
+index 6c221c7..2abae7a 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -12,10 +12,14 @@ license-files = ["LICENSE"]
+ dependencies = [
+     "jax>=0.6.2",
+     "numpy>=1.24",
++    "optax>=0.2.8",
++    "tomli>=2 ; python_full_version < '3.11'",
+ ]
+ 
+ [project.scripts]
+ foragers-world-rl = "foragers_world_rl.agent:main"
++foragers-ppo = "foragers_world_rl.ppo:main"
++foragers-experiment = "foragers_world_rl.experiments:main"
+ 
+ [build-system]
+ requires = ["uv_build>=0.12.1,<0.13.0"]
+diff --git a/src/foragers_world_rl/agent.py b/src/foragers_world_rl/agent.py
+index ed65f14..d3d35eb 100644
+--- a/src/foragers_world_rl/agent.py
++++ b/src/foragers_world_rl/agent.py
+@@ -36,8 +36,7 @@ from foragers_world_rl.world import (
+     MAX_FOOD_PER_TILE,
+     MAX_POPULATION,
+     MOVE_COSTS,
+-    POP_BAND_HIGH,
+-    POP_BAND_LOW,
++    DEFAULT_BAND,
+     env_step,
+     init_env_state,
+     observe,
+@@ -81,7 +80,7 @@ POLICIES: dict[str, tuple] = {
+ # ---------------------------------------------------------------------- rollout
+ 
+ 
+-def rollout(policy_fn, params, key: jax.Array):
++def rollout(policy_fn, params, key: jax.Array, band=DEFAULT_BAND):
+     """One episode under `policy_fn`. Returns the per-step trajectory.
+ 
+     Observe, act, then step -- in that order, so the obs stored alongside an
+@@ -94,7 +93,7 @@ def rollout(policy_fn, params, key: jax.Array):
+ 
+         obs = observe(state)
+         action = policy_fn(params, obs, act_key)
+-        state, _obs_after, reward, done = env_step(state, action, env_key)
++        state, _obs_after, reward, done = env_step(state, action, env_key, band)
+ 
+         return state, (obs, action, reward, done, state.foragers.population)
+ 
+@@ -112,15 +111,23 @@ def rollout(policy_fn, params, key: jax.Array):
+         "pops": pops,          # (STEPS,)
+     }
+ 
++batched_rollout = jax.jit(
++    jax.vmap(rollout, in_axes=(None, None, 0, None)), static_argnums=(0,)
++)
++
+ 
+-def evaluate(policy_fn, params, seed: int = 0, worlds: int = 256) -> dict:
++def evaluate(policy_fn, params, seed: int = 0, worlds: int = 256,
++             band=DEFAULT_BAND) -> dict:
+     """Run `worlds` independent episodes in parallel and summarise them."""
+-    batched = jax.jit(jax.vmap(rollout, in_axes=(None, None, 0)), static_argnums=(0,))
+     keys = jax.random.split(jax.random.key(seed), worlds)
+-    traj = batched(policy_fn, params, keys)
++    traj = batched_rollout(policy_fn, params, keys, jnp.asarray(band))
+ 
+     # Reward is 1 per in-band step, so an episode's return is its in-band count.
+-    returns = traj["rewards"].sum(axis=1)       # (worlds,)
++    # scan keeps stepping a world after its episode ends, so only count rewards
++    # up to and including the first done. Without this, a band that contains 0
++    # scores an extinct world as in-band for every remaining step.
++    ended_before = (jnp.cumsum(traj["dones"], axis=1) - traj["dones"]) > 0
++    returns = jnp.where(ended_before, 0.0, traj["rewards"]).sum(axis=1)  # (worlds,)
+     # scan has a fixed trip count, so a world that dies keeps getting stepped.
+     # Check whether population EVER hit zero, not just where it ended -- a dead
+     # population stays dead, but reading only the last step would also count a
+@@ -145,15 +152,21 @@ def evaluate(policy_fn, params, seed: int = 0, worlds: int = 256) -> dict:
+ 
+ 
+ def record(
+-    policy_fn, params, seed: int, out: Path, label: str, steps: int = EPISODE_STEPS
++    policy_fn, params, seed: int, out: Path, label: str, steps: int = EPISODE_STEPS,
++    band=DEFAULT_BAND, world: int = 0, worlds: int = 256,
+ ) -> Path:
+     """Replay one episode eagerly, snapshotting each step for the web viewer.
+ 
+     Deliberately outside scan: the Recorder builds Python lists and dicts, so
+     it cannot be traced. Slow, but it is one episode.
++
++    Replays world `world` of `evaluate(..., seed, worlds)` exactly: the keys are
++    derived the same way as in `evaluate` and `rollout`, so the recording is one
++    of the episodes the scores came from, not a lookalike.
+     """
+-    key = jax.random.key(seed)
+-    key, init_key = jax.random.split(key)
++    world_key = jax.random.split(jax.random.key(seed), worlds)[world]
++    init_key, scan_key = jax.random.split(world_key)
++    step_keys = jax.random.split(scan_key, EPISODE_STEPS)
+     state = init_env_state(init_key)
+ 
+     rec = Recorder(
+@@ -163,6 +176,8 @@ def record(
+         params={
+             "policy": label,
+             "seed": seed,
++            "world": world,
++            "worlds": worlds,
+             "grid_size": GRID_SIZE,
+             "max_population": MAX_POPULATION,
+             "initial_population": INITIAL_POPULATION,
+@@ -170,23 +185,22 @@ def record(
+             "food_regrowth": FOOD_REGROWTH_RATE,
+             "max_food_per_tile": MAX_FOOD_PER_TILE,
+             "move_costs": [float(c) for c in MOVE_COSTS],
+-            "pop_band": [POP_BAND_LOW, POP_BAND_HIGH],
++            "pop_band": [int(band[0]), int(band[1])],
+             "episode_steps": EPISODE_STEPS,
+         },
+     )
+     rec.snapshot(state.world, state.foragers)  # frame 0 = initial state
+ 
+     total_reward = 0.0
+-    for _ in range(steps):
+-        key, step_key = jax.random.split(key)
++    for step_key in step_keys[:steps]:
+         act_key, env_key = jax.random.split(step_key)
+ 
+         obs = observe(state)
+         action = policy_fn(params, obs, act_key)
+-        state, _obs, reward, done = env_step(state, action, env_key)
++        state, _obs, reward, done = env_step(state, action, env_key, band)
+ 
+         total_reward += float(reward)
+-        rec.snapshot(state.world, state.foragers)
++        rec.snapshot(state.world, state.foragers, action=action, reward=reward)
+         if bool(done):
+             break
+ 
+@@ -227,11 +241,13 @@ def main() -> None:
+         default=EPISODE_STEPS,
+         help="steps to record; fewer keeps the JSON small",
+     )
++    ap.add_argument("--band", type=int, nargs=2, default=DEFAULT_BAND,
++                    metavar=("LOW", "HIGH"), help="target population band, inclusive")
+     a = ap.parse_args()
+ 
+     if a.policy is None:
+         print("policies:", ", ".join(POLICIES))
+-        print(f"\nband {POP_BAND_LOW}-{POP_BAND_HIGH}, {EPISODE_STEPS} steps, "
++        print(f"\nband {a.band[0]}-{a.band[1]}, {EPISODE_STEPS} steps, "
+               f"{N_ACTIONS} actions (move costs "
+               f"{float(MOVE_COSTS[0]):g}..{float(MOVE_COSTS[-1]):g})")
+         return
+@@ -239,7 +255,7 @@ def main() -> None:
+     if a.policy == "all":
+         rows = []
+         for name, (fn, params) in POLICIES.items():
+-            stats = evaluate(fn, params, seed=a.seed, worlds=a.worlds)
++            stats = evaluate(fn, params, seed=a.seed, worlds=a.worlds, band=a.band)
+             rows.append((name, stats))
+         rows.sort(key=lambda r: -r[1]["mean_return"])
+         print(f"{'policy':>12} {'return':>14} {'extinct':>8} {'final pop':>10}")
+@@ -256,9 +272,9 @@ def main() -> None:
+         ap.error(f"unknown policy {a.policy!r}; choose from {', '.join(POLICIES)}")
+ 
+     fn, params = POLICIES[a.policy]
+-    report(a.policy, evaluate(fn, params, seed=a.seed, worlds=a.worlds))
++    report(a.policy, evaluate(fn, params, seed=a.seed, worlds=a.worlds, band=a.band))
+     if a.record:
+-        record(fn, params, a.seed, a.record, a.policy, steps=a.record_steps)
++        record(fn, params, a.seed, a.record, a.policy, steps=a.record_steps, band=a.band)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/src/foragers_world_rl/recorder.py b/src/foragers_world_rl/recorder.py
+index 928b71c..d8fc46e 100644
+--- a/src/foragers_world_rl/recorder.py
++++ b/src/foragers_world_rl/recorder.py
+@@ -10,7 +10,7 @@ Python that runs between steps.
+     rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION)
+     for i in range(steps):
+         ...                          # advance the sim
+-        rec.snapshot(world, foragers)
++        rec.snapshot(world, foragers, action=action, reward=reward)
+     rec.save("runs/my_run.json")
+ 
+ Only ALIVE foragers are written per frame, so the file stays small when the
+@@ -47,9 +47,13 @@ class Recorder:
+         self._prev_food: np.ndarray | None = None
+ 
+     # --- recording -----------------------------------------------------------
+-    def snapshot(self, world, foragers) -> None:
++    def snapshot(self, world, foragers, action=None, reward=None) -> None:
+         """Append one frame. Call once per simulation step.
+ 
++        `action` and `reward` are for the step that PRODUCED this frame, so the
++        initial frame has neither. The viewer maps the action index to a move
++        cost via params["move_costs"].
++
+         Converts JAX arrays to plain Python via numpy. That forces the
+         computation to complete, so recording every step of a long run is
+         slower than not recording -- fine for producing a trajectory to look
+@@ -82,6 +86,11 @@ class Recorder:
+             ],
+         }
+ 
++        if action is not None:
++            frame["action"] = int(action)
++        if reward is not None:
++            frame["reward"] = float(reward)
++
+         # Food is delta-encoded. On a 100x100 grid only a handful of cells change
+         # per step, so writing the whole grid every frame is ~96% waste. Frame 0
+         # carries the full grid ("food"); later frames carry only the cells that
+diff --git a/src/foragers_world_rl/world.py b/src/foragers_world_rl/world.py
+index a1c4050..d411a91 100644
+--- a/src/foragers_world_rl/world.py
++++ b/src/foragers_world_rl/world.py
+@@ -4,8 +4,10 @@ from typing import NamedTuple
+ # keep small for initial testing
+ MAX_POPULATION = 256
+ INITIAL_POPULATION = 16
+-# target range for RL
++# Default target range for RL. env_step takes the band as an argument so
++# experiments can vary it without recompiling; this is what it falls back to.
+ POP_BAND_LOW, POP_BAND_HIGH = 80, 140
++DEFAULT_BAND = (POP_BAND_LOW, POP_BAND_HIGH)
+ 
+ # must be 2^n
+ GRID_SIZE = 32
+@@ -146,10 +148,8 @@ def breed(forager: Foragers) -> Foragers:
+     # compute which slots are currently free
+     free = ~forager.alive
+ 
+-    # array of free slots up to slot n
+-    free_rank = jnp.cumsum(free) - 1
+     # array of eligble parents up to slot n
+-    parent_rank = jnp.cumsum(can_breed) - 1 
++    parent_rank = jnp.cumsum(can_breed) - 1
+ 
+     # if more parents want to breed than slots available, prevent
+     # parents after total free slots from breeding
+@@ -157,30 +157,21 @@ def breed(forager: Foragers) -> Foragers:
+     # will build up energy if continously blocked from breeding
+     is_parent = can_breed & (parent_rank < free.sum())
+ 
+-    # gets_child[i, j] = does free slot i take forager j's child?
+-    gets_child = (
+-        free[:, None] #(N, 1)
+-        & is_parent[None, :] #(1, N)
+-        & (free_rank[:, None] == parent_rank[None, :]) #(N, N)
+-    )
+-
+-    # Reduce along axis 1 (collapse the parent axis) -> one answer per SLOT.
+-    # (N, )
+-    # which slot receives a child
+-    receives = gets_child.any(axis=1)
+-    # which parent goes with which slot
+-    from_parent = jnp.where(receives, jnp.argmax(gets_child, axis=1), -1)
++    # The k-th parent's child goes into the k-th free slot.
++    # free_slots[k] = index of the k-th free slot, padded with MAX_POPULATION.
++    # `size` fixes the output shape so this works under jit.
++    free_slots = jnp.nonzero(free, size=MAX_POPULATION, fill_value=MAX_POPULATION)[0]
++    # Non-parents point out of bounds, and mode="drop" discards those writes.
++    child_slot = jnp.where(is_parent, free_slots[parent_rank], MAX_POPULATION)
+ 
+     # any parent that breeds looses half its energy
+     new_energy = jnp.where(is_parent, forager.energy / 2, forager.energy)
+ 
+-    # only update slots where they are receiving a child
+-    new_pos = jnp.where(receives[:, None], forager.pos[from_parent], forager.pos)
+-    # Children take half the parent's ORIGINAL energy, which is what new_energy
+-    # already holds at the parent's slot.
+-    new_energy = jnp.where(receives, new_energy[from_parent], new_energy)
+-    # any slot that received a child is now alive
+-    new_alive = forager.alive | receives
++    # Scatter each parent into its child's slot. Children take half the
++    # parent's ORIGINAL energy, which is what new_energy already holds.
++    new_pos = forager.pos.at[child_slot].set(forager.pos, mode="drop")
++    new_energy = new_energy.at[child_slot].set(new_energy, mode="drop")
++    new_alive = forager.alive.at[child_slot].set(True, mode="drop")
+ 
+     return Foragers(new_pos, new_energy, new_alive)
+ 
+@@ -210,7 +201,10 @@ def init_env_state(key: jax.Array) -> EnvState:
+ 
+ 
+ # Initial base for RL -> returns new state, obs, rewards and done.
+-def env_step(state: EnvState, action: jax.Array, step_key: jax.Array) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
++# `band` is (low, high), inclusive. Pass it as an array to keep it traced, so a
++# different band reuses the same compiled step.
++def env_step(state: EnvState, action: jax.Array, step_key: jax.Array,
++             band=DEFAULT_BAND) -> tuple[EnvState, jax.Array, jax.Array, jax.Array]:
+ 
+     # setup all random keys needed. Each consumer of randomness gets its own
+     # branch so the food draw and the movement draw stay independent.
+@@ -236,7 +230,7 @@ def env_step(state: EnvState, action: jax.Array, step_key: jax.Array) -> tuple[E
+ 
+     # Reward -> 1 for each step kept in band. jnp.where, not a Python
+     # conditional: both branches are evaluated and selected elementwise.
+-    in_band = foragers.population_in_band(POP_BAND_LOW, POP_BAND_HIGH)
++    in_band = foragers.population_in_band(band[0], band[1])
+     reward = jnp.where(in_band, 1.0, 0.0)
+ 
+     obs = observe(new_state)
+diff --git a/tests/test_world.py b/tests/test_world.py
+index 2056463..4e16568 100644
+--- a/tests/test_world.py
++++ b/tests/test_world.py
+@@ -462,6 +462,24 @@ def test_recorder_handles_extinction():
+     assert rec.frames[0]["mean_energy"] == 0.0
+ 
+ 
++def test_recorder_records_action_and_reward():
++    """The initial frame has no action; later frames carry the one that made them.
++
++    The viewer reads `action` as an index into params["move_costs"], so it must
++    be a plain int, and must be absent (not 0) where no action was taken.
++    """
++    foragers = _foragers(positions=[[2, 2]], energies=[8.0], alives=[True])
++    world = _world(jnp.zeros((GRID_SIZE, GRID_SIZE)))
++
++    rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION)
++    rec.snapshot(world, foragers)
++    rec.snapshot(world, foragers, action=jnp.int32(7), reward=jnp.float32(1.0))
++
++    assert "action" not in rec.frames[0] and "reward" not in rec.frames[0]
++    assert rec.frames[1]["action"] == 7 and type(rec.frames[1]["action"]) is int
++    assert rec.frames[1]["reward"] == 1.0
++
++
+ def test_recorder_round_trips_to_json():
+     """The saved file parses back and keeps the frames. Guards the viewer contract."""
+     import json
+diff --git a/uv.lock b/uv.lock
+index 970f4a4..3047ff7 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -9,6 +9,15 @@ resolution-markers = [
+     "python_full_version < '3.11'",
+ ]
+ 
++[[package]]
++name = "absl-py"
++version = "2.5.1"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/1f/1d/58e2b5a6e4d703ccb2a029943d665974cb3d5a4fb2b3e3675dd03a9df10e/absl_py-2.5.1.tar.gz", hash = "sha256:286e71c82c1a38e75bbcf185f9b37d0305ad7786535107cb49bf4df9ff2e1f95", size = 118387, upload-time = "2026-10-09T08:38:58.037Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/b3/7d/01e62f59e4166af1be6238d9f2b7f3453630c51b8044b412d05b5606532a/absl_py-2.5.1-py3-none-any.whl", hash = "sha256:721200f2f0e9960f2ca9dc3a2a706b201f5f75d812c158f059cbbe29eeafbdb8", size = 137673, upload-time = "2026-10-09T08:38:56.629Z" },
++]
++
+ [[package]]
+ name = "foragers-world-rl"
+ version = "0.1.0"
+@@ -20,12 +29,16 @@ dependencies = [
+     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
++    { name = "optax" },
++    { name = "tomli", marker = "python_full_version < '3.11'" },
+ ]
+ 
+ [package.metadata]
+ requires-dist = [
+     { name = "jax", specifier = ">=0.6.2" },
+     { name = "numpy", specifier = ">=1.24" },
++    { name = "optax", specifier = ">=0.2.8" },
++    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2" },
+ ]
+ 
+ [[package]]
+@@ -482,6 +495,27 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/23/cd/066e86230ae37ed0be70aae89aabf03ca8d9f39c8aea0dec8029455b5540/opt_einsum-3.4.0-py3-none-any.whl", hash = "sha256:69bb92469f86a1565195ece4ac0323943e83477171b91d24c35afe028a90d7cd", size = 71932, upload-time = "2024-09-26T14:33:23.039Z" },
+ ]
+ 
++[[package]]
++name = "optax"
++version = "0.2.8"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "absl-py" },
++    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
++    { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
++    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
++    { name = "jaxlib", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
++    { name = "jaxlib", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
++    { name = "jaxlib", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
++    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
++    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
++    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/8c/f9/e3d11ae6f298ee941a0690e353a323d158ba5dedc436e75621c310845c5c/optax-0.2.8.tar.gz", hash = "sha256:5b225b35066fc3eebaa4d798f1b4173b4d57d1a480610908981f8343b50af0b0", size = 301193, upload-time = "2026-03-20T23:30:05.465Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/8a/69/6a93d8600c339d7687a05857c7907bd4dd8cf88691a5ea106d7a50af90a1/optax-0.2.8-py3-none-any.whl", hash = "sha256:e3ca2d36c99daab1800ae9dbc0545034382d6bc780b24d969e1b0df65fa31cb4", size = 402960, upload-time = "2026-03-20T23:30:03.886Z" },
++]
++
+ [[package]]
+ name = "scipy"
+ version = "1.15.3"
+@@ -690,3 +724,75 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/5c/a2/5b7d5270621ab7cfa3f7766067bf95dc360b5efb6394694e8143b4156e2b/scipy-1.18.1-cp315-cp315t-win_amd64.whl", hash = "sha256:5632e3ae3d09197c446310cd5187de63e28448ce22f0f67b2b93d97503c0c230", size = 37408295, upload-time = "2026-08-21T23:28:40.724Z" },
+     { url = "https://files.pythonhosted.org/packages/63/ad/741c19fcb66755ff953daf9243af8480e4bf3d7fbe57583c178c7d2b6b51/scipy-1.18.1-cp315-cp315t-win_arm64.whl", hash = "sha256:eda632a7981f69730d6281f451db9c1c370993a2c0d7ddb43e2a809a2862b83a", size = 25319710, upload-time = "2026-08-21T23:28:45.713Z" },
+ ]
++
++[[package]]
++name = "tomli"
++version = "2.5.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/b0/78/9ad63712633ed3ab5cc1a648d863d7e7da371e9425e209555a0fe711b695/tomli-2.5.0.tar.gz", hash = "sha256:264507556cd8b8c8e7c6ee037cdf443a463f03f4c958e57195e3d369711b8ff6", size = 17662, upload-time = "2026-10-07T12:23:37.892Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/22/a6/ab99b60ee52acd949684febabc3005d0045d0f66bebd9cdebd67372d26dd/tomli-2.5.0-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:c4dc1c1781f2f716de763d1e9a7b34c6a894e167e291c7c5d16c72f7a9538545", size = 163901, upload-time = "2026-10-07T12:22:15.601Z" },
++    { url = "https://files.pythonhosted.org/packages/bc/00/ee01b7ed4579180fff07142d290257f25ba786f23f3ec6005f620933c2f5/tomli-2.5.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:eff8babca5a7999bc137acbc7482a8b7e17ffca5075ab41f5d770ab408c7bfef", size = 163756, upload-time = "2026-10-07T12:22:16.957Z" },
++    { url = "https://files.pythonhosted.org/packages/72/c2/4efebf65372f6583185f79799312109dddb61102d47e5c33dcfd1a297aca/tomli-2.5.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:86665cee9c4835b7a7f1e8ec2c719b5258d4dc782887aded5a8ae7352a96843b", size = 268038, upload-time = "2026-10-07T12:22:18.135Z" },
++    { url = "https://files.pythonhosted.org/packages/53/07/5850468e925d898abb36038666f9c333a94d2a223e802a8ba5b6d319d23f/tomli-2.5.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d7e369fd63331746182360977b1892bfc215476a30d61612d732425311639f56", size = 276422, upload-time = "2026-10-07T12:22:19.567Z" },
++    { url = "https://files.pythonhosted.org/packages/b4/87/f293984cdcf83c054196d4fd3dad44fc68ae55b4b8c44bc76cef360c3150/tomli-2.5.0-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:7ad1ea345759240d6463efa0ed1c704402752e49aa21476620738d74d72d8aa1", size = 272616, upload-time = "2026-10-07T12:22:20.794Z" },
++    { url = "https://files.pythonhosted.org/packages/ce/ce/db582886b3c1219d3fec93ebd669332482e5aee7a91e0f7838d84f2d1759/tomli-2.5.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:96243987194634bd411066ce40c952e108f86af04db533ecd8ac3ff2a85b1885", size = 276593, upload-time = "2026-10-07T12:22:22.12Z" },
++    { url = "https://files.pythonhosted.org/packages/bf/72/7619b87dea4261fc27dd7b54c4461c129c1f7d9bb7ba3aec89c797a431b8/tomli-2.5.0-cp311-cp311-win32.whl", hash = "sha256:610b27d99f28ec5f191c7064a48f3ddb179a1fe6ca73d571483ae859f57b605e", size = 101830, upload-time = "2026-10-07T12:22:23.651Z" },
++    { url = "https://files.pythonhosted.org/packages/1e/74/220106da34502304b6751a2a9b8a9fbca6c3fd47e737a2e2e3da7c61c9db/tomli-2.5.0-cp311-cp311-win_amd64.whl", hash = "sha256:c804ae44fe7b4bab5da295e4f980a1ff04670bca9d23fe0a4e887e08ebd741a8", size = 112742, upload-time = "2026-10-07T12:22:24.972Z" },
++    { url = "https://files.pythonhosted.org/packages/27/99/7d9c8b41837a7773613e169504147375c157a290167aa59ad74a085f521f/tomli-2.5.0-cp311-cp311-win_arm64.whl", hash = "sha256:cfac177ebd6236003846ea339981f71457cb6eb748f23381eb257e45092e3980", size = 109332, upload-time = "2026-10-07T12:22:26.117Z" },
++    { url = "https://files.pythonhosted.org/packages/52/ed/7baa86f87493646a594de388c7c1c40a39dd0461f7e9c0359cbeefc91fe8/tomli-2.5.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:1f4a40d03fb9f63424f0979855bdeaf44dd7696b8d59501822c10ed30ba532df", size = 164854, upload-time = "2026-10-07T12:22:27.444Z" },
++    { url = "https://files.pythonhosted.org/packages/a5/b1/44c0341f2224397855723c7a8a39f718ea6fcbcc3dacc66e5aeca0f334e3/tomli-2.5.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:9ebf8d19b17bd0daeb7b7dec81a946a439b753942fd0210d6e96c532249eea6b", size = 164074, upload-time = "2026-10-07T12:22:28.679Z" },
++    { url = "https://files.pythonhosted.org/packages/23/04/e2d5b7d3fba47adedb23de616c16d428ea076c79a3d8e1d95d649ffe197e/tomli-2.5.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bf0b5e8e0f68ebb494356e577c06c139161efd8d3b9050f93b39b7c26cc54ff0", size = 274274, upload-time = "2026-10-07T12:22:29.804Z" },
++    { url = "https://files.pythonhosted.org/packages/43/90/6090e706ff27a6f89f4a40578e3324b95c3cd8c4150868aabf33a8f414c3/tomli-2.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6cf74416bdc94ae458b14e37286c1073081850ac8459a00d0c5efef5d44294c6", size = 286435, upload-time = "2026-10-07T12:22:31.297Z" },
++    { url = "https://files.pythonhosted.org/packages/0a/9e/a2c40768df16c408f22430afb0a73e9d7e5f79c950884954649d1146b74d/tomli-2.5.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:61ea1ebe1e55a34ea8199cc8dbff398d35027b82271c8ac4802fd3a1fd5b1bcc", size = 278119, upload-time = "2026-10-07T12:22:32.601Z" },
++    { url = "https://files.pythonhosted.org/packages/12/25/3c0cb485b98e9cfac495629b1c93c87ccf0b72fbe9d2689fd8fe62c6d5a3/tomli-2.5.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:ed53f7e89bb04f6d9e8e7799112360b0c4d5cbff067de0814c98c37c39b920f7", size = 286177, upload-time = "2026-10-07T12:22:33.745Z" },
++    { url = "https://files.pythonhosted.org/packages/77/8b/0144c65f0e37e51c18d04ae15c21b19431c165002d0131fe9aa8b0b8b1e8/tomli-2.5.0-cp312-cp312-win32.whl", hash = "sha256:e7ad033e27a516a233bea839cdb77b80146facb3b4f40bf02cd0cac165cdd5c2", size = 102760, upload-time = "2026-10-07T12:22:34.887Z" },
++    { url = "https://files.pythonhosted.org/packages/de/32/5d6d8f42fc9a05fce69354e00ff256484192f5f2fc9a2165718fa0de61ec/tomli-2.5.0-cp312-cp312-win_amd64.whl", hash = "sha256:bd05de8c1698f8413dd7d869492693a0bf2211543b787ac78cd5e7536af1a6d7", size = 112722, upload-time = "2026-10-07T12:22:36.162Z" },
++    { url = "https://files.pythonhosted.org/packages/30/65/df18032218db0fb9b769fb23c8039a051f15c811993995ea04c350273a32/tomli-2.5.0-cp312-cp312-win_arm64.whl", hash = "sha256:069435bd5480429b98c5e5afb02ab21c219b6f0064680671c6dc0d46817346ea", size = 109534, upload-time = "2026-10-07T12:22:37.296Z" },
++    { url = "https://files.pythonhosted.org/packages/42/e5/51736d70da209350969e15aca5c5ab6e2ce1ea87a0a892a6c13aec172a86/tomli-2.5.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:943276cf269e0071948d9ff697159c1735e623c1151d88abb09b74659ef0cbea", size = 163328, upload-time = "2026-10-07T12:22:38.373Z" },
++    { url = "https://files.pythonhosted.org/packages/ec/55/086f80dab4ab497602644274e6dea7ec5dd0b4e262e443a8ad3bb7edee2d/tomli-2.5.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:463b16086865b97facd8d0b3fb4cb7c544e3f58d2a69dc3113d6db9653fdb043", size = 162246, upload-time = "2026-10-07T12:22:39.673Z" },
++    { url = "https://files.pythonhosted.org/packages/aa/eb/3ecc94459f3635c92321f4e7bde571323fdb2267c50e19e3188a281eae3b/tomli-2.5.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1245a6638fc4bb0a60af38a7d45413db34a13842027c77597c712c998c62fdf0", size = 272655, upload-time = "2026-10-07T12:22:41.08Z" },
++    { url = "https://files.pythonhosted.org/packages/c0/d7/494fd1f0c37a621f1ad9975c2efadb523e8101f144ed6edb2e7fe64738f2/tomli-2.5.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5d8bac3d603c97e6854424e5b2b5b741bdbde387e09f162fb0446812b4a8362b", size = 283595, upload-time = "2026-10-07T12:22:42.222Z" },
++    { url = "https://files.pythonhosted.org/packages/70/51/bb8d62b1317e6640866f6949b2d5855e5300f2c99d46de1cd245570bba65/tomli-2.5.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:21e4cae4114aba25aa0d4f85cdf486d290fb35c0954d7bba536248da64d43066", size = 276253, upload-time = "2026-10-07T12:22:43.625Z" },
++    { url = "https://files.pythonhosted.org/packages/66/f4/f46bd7f0763cd47de2db697dca9257c6a4adfd1a93b018cc75c8190ed5a8/tomli-2.5.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:bbaefc84548d754be821bba7c4141c4787dda182f9e77f2f87b71213529efa7b", size = 283582, upload-time = "2026-10-07T12:22:44.983Z" },
++    { url = "https://files.pythonhosted.org/packages/ac/03/70f2bcb2923a6db37818d917e124270a7f4cfd38ea576f5aa753a91c0ef5/tomli-2.5.0-cp313-cp313-win32.whl", hash = "sha256:abdbf6313b8d9efe157edeb7ab6eae4de064b1300ad31abf73755154b30abe68", size = 102628, upload-time = "2026-10-07T12:22:46.508Z" },
++    { url = "https://files.pythonhosted.org/packages/dc/98/d52024bb5b0ff68b4f0d276d867f634c84a67319a7e9f6b7708a37742333/tomli-2.5.0-cp313-cp313-win_amd64.whl", hash = "sha256:fd4dc129784e0c5335bd4e61dfcc4487499a013419e655cf2da1d091b7e0efdc", size = 113301, upload-time = "2026-10-07T12:22:47.647Z" },
++    { url = "https://files.pythonhosted.org/packages/6f/f2/540db3a70572a8c23a28aba3e9c358ce0ffffbafc990905c1343aa265b31/tomli-2.5.0-cp313-cp313-win_arm64.whl", hash = "sha256:69491c143d2fe063046e0301e62a810bed338fa4d1ce0fd870c27dc1e09b0d84", size = 109744, upload-time = "2026-10-07T12:22:48.925Z" },
++    { url = "https://files.pythonhosted.org/packages/e4/49/caf6b307766eb9567664a8707e9d6be5fcc0e8903f18781c6677a60d80c7/tomli-2.5.0-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:d3182ee2d887e507bd67319a0a61105d1dd33facc111329559a233b772c1a105", size = 162899, upload-time = "2026-10-07T12:22:50.088Z" },
++    { url = "https://files.pythonhosted.org/packages/d3/c8/68cfce773a2733a49c74f99d627fb461bd990756860099eac25617889585/tomli-2.5.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:521345fd1f19d45b8df87657aaa38b6f2ca3800059fadf428e7ebf479a383646", size = 162080, upload-time = "2026-10-07T12:22:51.558Z" },
++    { url = "https://files.pythonhosted.org/packages/7e/b2/e5bb8651fdad593f670501a7d718b1a7f73f064d44dea15e04c04dfef45d/tomli-2.5.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6e95c7614e705bfe2b04b27aa124adec59752d15813df37e2156747cab3a006b", size = 273380, upload-time = "2026-10-07T12:22:52.918Z" },
++    { url = "https://files.pythonhosted.org/packages/8d/d2/9e2d7f8b1dfe0e2b34c245986ebd55c4c553ea4ce6c47c443b332673253f/tomli-2.5.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7ac2027d37c3afbdf4bdd377f2676f6f1d2122a5be1f1137b49dced590b37e75", size = 283228, upload-time = "2026-10-07T12:22:54.173Z" },
++    { url = "https://files.pythonhosted.org/packages/ba/df/ec7b876b7b1a2718bd74a3743c076fff565b04029ba33e8f61fac262739f/tomli-2.5.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:c414be4ed9d3cac80c42e348fa5a956117d1a48227f48026e31f59cb4a7671eb", size = 277189, upload-time = "2026-10-07T12:22:55.342Z" },
++    { url = "https://files.pythonhosted.org/packages/7d/7b/e192d9eed0b9cb80da799f4d77052297fb9a2c3cc9b19f571f56ea88add6/tomli-2.5.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:9b03d7dc168353b4132965bde20feceabaa470e570c6f59660dfae59b1f9eeb3", size = 283632, upload-time = "2026-10-07T12:22:56.735Z" },
++    { url = "https://files.pythonhosted.org/packages/84/50/ff94454e75461d75623e47401ed323d65c10aab8fe9033242c20cd2fdf32/tomli-2.5.0-cp314-cp314-win32.whl", hash = "sha256:6f041843c4d3a37245c0c056fd955b186bf8b1fb85690cbe40b81230891dc34b", size = 103535, upload-time = "2026-10-07T12:22:58.084Z" },
++    { url = "https://files.pythonhosted.org/packages/54/0b/bdacf05f963bd6026ebf6eeb0beda847d1d60e03e440725c64a4e08a0afd/tomli-2.5.0-cp314-cp314-win_amd64.whl", hash = "sha256:f4b653094e18f9031102d3a1da5c729c8f222d85225b18037dac621695e46e1a", size = 114621, upload-time = "2026-10-07T12:22:59.2Z" },
++    { url = "https://files.pythonhosted.org/packages/61/99/53f438fa6ae4f9d4ed0ddde3e7242b3bdc34b48c8f9948b72b9e9b127676/tomli-2.5.0-cp314-cp314-win_arm64.whl", hash = "sha256:3f89d10c1ff6a38d992c27fc8a4816af71a909e08a40ec66934240b1e74347c3", size = 111572, upload-time = "2026-10-07T12:23:00.479Z" },
++    { url = "https://files.pythonhosted.org/packages/b9/20/1f88f19427d380a40e90a770e087489eaafe4aeee070ae88ed2bbec00acd/tomli-2.5.0-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:e9e15b4a6c7dd6b85b5fbab29488a73f1f70de516942308daa266bf0e0aeb0d4", size = 171814, upload-time = "2026-10-07T12:23:01.914Z" },
++    { url = "https://files.pythonhosted.org/packages/d0/56/cbe5079c9f9a54b9b3e27fc82f08f3cb36edee75561679f53d2380c801d6/tomli-2.5.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:e12bbcd32897272fb05929110362ae9ff4c1b9bb26bd9e971e71dcd3275b4c3d", size = 171324, upload-time = "2026-10-07T12:23:03.18Z" },
++    { url = "https://files.pythonhosted.org/packages/2b/30/1d53fd3b0f1cb3ba542e345ec32c26aefdddc4e829e4f3429af8a4f27782/tomli-2.5.0-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:20aa36de8f2cf87237143bc1fa1aae8d6612c09118f4da21c6a684db5dd1f6f9", size = 297441, upload-time = "2026-10-07T12:23:04.345Z" },
++    { url = "https://files.pythonhosted.org/packages/66/d9/0800acb6a111686f764c1b91ef15cc42a20a66a46013bb42220f1d2c61c1/tomli-2.5.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:22185fad8a1e622f064e78008018a0dd3323550dcb479cb7a1d296888d74024f", size = 307476, upload-time = "2026-10-07T12:23:05.671Z" },
++    { url = "https://files.pythonhosted.org/packages/e8/63/30a8f3cd51b5bec37f04744bad0b0dc6160df84aad4f27b0e9283d66f221/tomli-2.5.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:984012f71908165449a951de2050d52f276bfe3aa5d5f570f63ddad814370374", size = 296113, upload-time = "2026-10-07T12:23:07.202Z" },
++    { url = "https://files.pythonhosted.org/packages/ab/18/0b9ffc597e69c5a1e20a7823cb60d54b39a9f54e91edcb8574f022186758/tomli-2.5.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:f79203b3965b4000e91808aaa7c040206093f2b8bf86f455982f2274c9ccf442", size = 307725, upload-time = "2026-10-07T12:23:08.508Z" },
++    { url = "https://files.pythonhosted.org/packages/ab/c7/18f8baae0b5607a60e8e19b4a7fedee43a8ff6458e3896dcbbadeeac9c22/tomli-2.5.0-cp314-cp314t-win32.whl", hash = "sha256:91294a9fb94a75542f6e46e4a2ae709bd8d9b51134098cae5cf3bea5478b6d03", size = 108546, upload-time = "2026-10-07T12:23:09.956Z" },
++    { url = "https://files.pythonhosted.org/packages/72/34/4cca9739254130627bde87500b3f2b512154fe2f278efa7e2a5e10ad4bcb/tomli-2.5.0-cp314-cp314t-win_amd64.whl", hash = "sha256:f15e3e0b835a6d68b10c86bf80a3149780498d6911c93c3ffd1861d19f9200f1", size = 117814, upload-time = "2026-10-07T12:23:11.486Z" },
++    { url = "https://files.pythonhosted.org/packages/7d/fb/afa530d47dd80a78fce43beac6bc6e00f84558eafcffbc6f37b21e80d056/tomli-2.5.0-cp314-cp314t-win_arm64.whl", hash = "sha256:6664b7ae7af7294256c53960a6103077f4914cec8ff98479c352f622c6f6b2f0", size = 115188, upload-time = "2026-10-07T12:23:12.728Z" },
++    { url = "https://files.pythonhosted.org/packages/66/98/316fdc00f8c0939e6fe50461dd343c162d3ad51d1286eb25b7db54361d50/tomli-2.5.0-cp315-cp315-macosx_10_15_x86_64.whl", hash = "sha256:a525685c2f97da40762b8695eb7aa0af4c8344ca1905c73e4e29cb04d34607dc", size = 162775, upload-time = "2026-10-07T12:23:13.941Z" },
++    { url = "https://files.pythonhosted.org/packages/c5/22/7b10fa5bb01c9539f53f69b619361b19350acc73657772ea7ac70ba309a8/tomli-2.5.0-cp315-cp315-macosx_11_0_arm64.whl", hash = "sha256:9dbb18c1cfb2f6517942fc9314437f66aa06d94436ffb1f06102ef3572f35276", size = 161406, upload-time = "2026-10-07T12:23:15.215Z" },
++    { url = "https://files.pythonhosted.org/packages/9c/e7/1a069d86dfd20f1f84f71c63faed9f83c1d890bc06c27d82dc7d888fb573/tomli-2.5.0-cp315-cp315-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:752e8b1aa6a4367ef8bf6a1a1e005540f7ed055ba36d7193796812ca5404eb52", size = 273855, upload-time = "2026-10-07T12:23:16.471Z" },
++    { url = "https://files.pythonhosted.org/packages/ae/83/d1ef43d1687d092ab9c235455c76e6e709483b346b056f086095c7c263a5/tomli-2.5.0-cp315-cp315-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c47300f9bf791808f77d82747691c4bb09cb14bdf3060cca99b42cdc4361d5a7", size = 284910, upload-time = "2026-10-07T12:23:18.166Z" },
++    { url = "https://files.pythonhosted.org/packages/cc/05/f4d9cf7de61822ece0c3873f30d291e324911c71a378b8bfe5ced13fd9f5/tomli-2.5.0-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:19b0dd8749f4ea2f112c5fcfb3c5248390c899d7e2e173f1d91abee1fa0ff391", size = 277723, upload-time = "2026-10-07T12:23:19.355Z" },
++    { url = "https://files.pythonhosted.org/packages/42/28/78262493141fa543151cf005760c3cb01d09fc28a11f993c05109902cb8c/tomli-2.5.0-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:57b1c3b01fab802e2899bc3d168dca320e14165e2fd9fd584760fb4ca5826859", size = 285115, upload-time = "2026-10-07T12:23:20.698Z" },
++    { url = "https://files.pythonhosted.org/packages/1a/b9/e1dab9a30bcb677b5cc5cee810609cfd64f24306a3055767dd3fda00b1e0/tomli-2.5.0-cp315-cp315-win32.whl", hash = "sha256:667e521b37a6c5ccaa044202c235b530f90177ffe2cd4a64ecc213c7dd535feb", size = 103475, upload-time = "2026-10-07T12:23:21.941Z" },
++    { url = "https://files.pythonhosted.org/packages/4c/bd/31a3790c11d6ea95fcf5e6022ac0f8d0543c9b61120b730fc481bd43d3b4/tomli-2.5.0-cp315-cp315-win_amd64.whl", hash = "sha256:d747252933c8a65ef6bd8da0fbb7ce28a90eb6119d8cd00772cd528aa07b68d5", size = 114589, upload-time = "2026-10-07T12:23:23.098Z" },
++    { url = "https://files.pythonhosted.org/packages/47/a2/4f6310fa699364f0e3af7ee3af88dddd9af066d33e716a0265bbe2b3ea84/tomli-2.5.0-cp315-cp315-win_arm64.whl", hash = "sha256:75dbcde8751b0a960aa3de173aa5e894d590755c6d7758b7e774c06f1dc3cbdd", size = 111493, upload-time = "2026-10-07T12:23:24.233Z" },
++    { url = "https://files.pythonhosted.org/packages/68/14/00853f0b396d8971107ae1921bb5b322fdee1650d2f16bf06c20adb532e5/tomli-2.5.0-cp315-cp315t-macosx_10_15_x86_64.whl", hash = "sha256:2419c2a189551987b59d80e63ec355671283336f41c6b9b89462df679c7d0c57", size = 171380, upload-time = "2026-10-07T12:23:25.512Z" },
++    { url = "https://files.pythonhosted.org/packages/89/ad/fa6949321dadee46b27363974fb197b94c911c3b0f7a5fd26d7dc18fc2a0/tomli-2.5.0-cp315-cp315t-macosx_11_0_arm64.whl", hash = "sha256:0dc598040da8d42cf20f0be588ed7004f46db12a0ac6c32e03a59dccedaaadcd", size = 170553, upload-time = "2026-10-07T12:23:26.855Z" },
++    { url = "https://files.pythonhosted.org/packages/53/aa/3056c919eb3e084df3752b2cf5f865dcc04af0b27dba2f66d7b28af4633a/tomli-2.5.0-cp315-cp315t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:49096930c8d886c9bbdab62d2d0d17ce823ddeea522309a190b36245d5b49e01", size = 294428, upload-time = "2026-10-07T12:23:28.132Z" },
++    { url = "https://files.pythonhosted.org/packages/96/b2/faeeb5d8769ea3832021d73e892c8391eae7b4b4f8b55a789127bd8b18a9/tomli-2.5.0-cp315-cp315t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b8ade5023067f99fe72b88accd30d0ea05a158e9e32a11f124e731ea9695313f", size = 304909, upload-time = "2026-10-07T12:23:29.381Z" },
++    { url = "https://files.pythonhosted.org/packages/f6/52/f094c09e73fb654b621716d019acb5d29bdfd1be01df80c281d552bda48d/tomli-2.5.0-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:b69564772b5c8f22ea5f498dff08cfa825045b4d4c4400529000bdf818aa3b2a", size = 293220, upload-time = "2026-10-07T12:23:30.608Z" },
++    { url = "https://files.pythonhosted.org/packages/86/f5/0c30541078ca4b505ce3bd76ed931facbfec524dd018535d691d1af0a6d2/tomli-2.5.0-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:8ff3a2ca028c7eee0c777f9a092038d0a594a9fa04e215f929a22c329e2cb142", size = 305705, upload-time = "2026-10-07T12:23:32.181Z" },
++    { url = "https://files.pythonhosted.org/packages/05/74/590e7d19d6a118fc5cc5704ff358e21d95b8573f6b9443b1519f29ca8825/tomli-2.5.0-cp315-cp315t-win32.whl", hash = "sha256:62fc1bc8eb03e3a9cadfca713d65614ed8e09d974a283295ffe3a831976b4dc5", size = 108432, upload-time = "2026-10-07T12:23:33.496Z" },
++    { url = "https://files.pythonhosted.org/packages/1c/b8/63a75cfb27a17c38550e44025d3a6e7be64516fd8608a3b75703bf37d81b/tomli-2.5.0-cp315-cp315t-win_amd64.whl", hash = "sha256:f3fcbc57b1791fa6cbe5d8434179d51de12be1a4811469529f47f6e7487a2571", size = 117281, upload-time = "2026-10-07T12:23:34.648Z" },
++    { url = "https://files.pythonhosted.org/packages/72/01/e8c1debb2173973372934c68fc8e46170ab60ef23ed4592dff4dec6e8993/tomli-2.5.0-cp315-cp315t-win_arm64.whl", hash = "sha256:d2ba24db8a9376921b5e87b4762b9adb0f3f1deaea68f2b8b0bb2c11efb9c3e7", size = 115069, upload-time = "2026-10-07T12:23:35.77Z" },
++    { url = "https://files.pythonhosted.org/packages/60/3f/3e3f8fd0919249b0200c80fbc4f9a1e70be19f9883da71dfb7f8b9ab8aca/tomli-2.5.0-py3-none-any.whl", hash = "sha256:32a7b79ac57a2e83670ce329ccf675798bc5a2094783a63676866b70503f2e2b", size = 14765, upload-time = "2026-10-07T12:23:36.875Z" },
++]
+diff --git a/viewer/index.html b/viewer/index.html
+index 8f81287..27c874d 100644
+--- a/viewer/index.html
++++ b/viewer/index.html
+@@ -16,6 +16,8 @@
+     --food: #7cb342;
+     --forager: #d94f3d;
+     --grid-line: #eceae6;
++    --action: #7c3aed;
++    --band: rgba(37, 99, 235, 0.08);
+   }
+   @media (prefers-color-scheme: dark) {
+     :root:not([data-theme="light"]) {
+@@ -28,6 +30,8 @@
+       --food: #8fc94f;
+       --forager: #f0705c;
+       --grid-line: #2a2c31;
++      --action: #a78bfa;
++      --band: rgba(91, 142, 245, 0.12);
+     }
+   }
+   * { box-sizing: border-box; }
+@@ -92,6 +96,7 @@
+   .stat { background: var(--panel); padding: 11px 13px; }
+   .stat .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+   .stat .v { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
++  .stat .v small { font-size: 12px; font-weight: 400; color: var(--muted); }
+ 
+   .legend { display: flex; gap: 14px; margin-top: 12px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+   .legend span { display: inline-flex; align-items: center; gap: 6px; }
+@@ -167,6 +172,16 @@
+         <div class="legend">
+           <span><i class="swatch" style="background:var(--forager)"></i> population</span>
+           <span><i class="swatch" style="background:var(--food)"></i> total food</span>
++          <span id="band-legend" hidden><i class="swatch" style="background:var(--band);outline:1px solid var(--accent)"></i> target band</span>
++          <span><i class="swatch" style="background:var(--accent)"></i> current step</span>
++        </div>
++      </div>
++
++      <div class="panel" style="margin-top:18px" id="action-panel" hidden>
++        <h2>Agent action (move cost)</h2>
++        <canvas id="actions" width="900" height="140"></canvas>
++        <div class="legend">
++          <span><i class="swatch" style="background:var(--action)"></i> move cost chosen each step</span>
+           <span><i class="swatch" style="background:var(--accent)"></i> current step</span>
+         </div>
+       </div>
+@@ -180,6 +195,8 @@
+           <div class="stat"><div class="k">Mean energy</div><div class="v" id="s-energy">—</div></div>
+           <div class="stat"><div class="k">Total food</div><div class="v" id="s-food">—</div></div>
+           <div class="stat"><div class="k">Step</div><div class="v" id="s-step">—</div></div>
++          <div class="stat action-stat"><div class="k">Move cost</div><div class="v" id="s-cost">—</div></div>
++          <div class="stat action-stat"><div class="k">Return so far</div><div class="v" id="s-return">—</div></div>
+         </div>
+       </div>
+ 
+@@ -226,6 +243,13 @@ function load(json, name) {
+   }
+   data = json;
+   expandFood(data);
++  // Action and reward belong to the step that produced a frame, so frame 0 has
++  // neither. Older recordings have none at all: hide the action UI for those.
++  data._hasActions = data.frames.some(f => f.action !== undefined);
++  let ret = 0;
++  data._return = data.frames.map(f => (ret += f.reward ?? 0));
++  $("action-panel").hidden = !data._hasActions;
++  for (const el of document.querySelectorAll(".action-stat")) el.hidden = !data._hasActions;
+   frame = 0;
+   $("empty").hidden = true;
+   $("app").hidden = false;
+@@ -251,10 +275,17 @@ $("file").addEventListener("change", e => {
+ // http.server returns an HTML directory listing, so scrape the .json links out
+ // of it. Fails quietly when opened as a file:// page -- the file picker and
+ // drag-and-drop still work.
++//
++// ?dir= points it somewhere else, e.g. an experiment's episodes:
++//   localhost:8000/viewer/?dir=../results/band_sweep/episodes/
++const RUNS_DIR = (() => {
++  const d = new URLSearchParams(location.search).get("dir") || "../runs/";
++  return d.endsWith("/") ? d : d + "/";
++})();
+ async function findRuns() {
+   const sel = $("preset");
+   try {
+-    const res = await fetch("../runs/");
++    const res = await fetch(RUNS_DIR);
+     if (!res.ok) throw new Error("HTTP " + res.status);
+     const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+     const names = [...doc.querySelectorAll("a")]
+@@ -268,11 +299,11 @@ async function findRuns() {
+     }
+     for (const n of names) {
+       const o = document.createElement("option");
+-      o.value = "../runs/" + n;
++      o.value = RUNS_DIR + n;
+       o.textContent = n;
+       sel.appendChild(o);
+     }
+-    sel.options[0].textContent = `— pick a run from runs/ (${names.length}) —`;
++    sel.options[0].textContent = `— pick a run from ${RUNS_DIR.replace(/^\.\.\//, "")} (${names.length}) —`;
+   } catch {
+     sel.options[0].textContent = "— serve over http to list runs/ —";
+   }
+@@ -381,6 +412,13 @@ function render() {
+   $("s-energy").textContent = f.mean_energy.toFixed(2);
+   $("s-food").textContent = f.total_food.toFixed(1);
+   $("s-step").textContent = f.step;
++  if (data._hasActions) {
++    const costs = (data.params || {}).move_costs;
++    $("s-cost").innerHTML = f.action === undefined ? "—"
++      : costs ? `${costs[f.action].toFixed(2)} <small>action ${f.action}</small>`
++      : `action ${f.action}`;
++    $("s-return").innerHTML = `${data._return[frame]} <small>/ ${frame}</small>`;
++  }
+   $("steplabel").textContent = `step ${frame} / ${data.frames.length - 1}`;
+   $("scrub").value = frame;
+   $("back").disabled = frame === 0;
+@@ -397,7 +435,10 @@ function drawChart() {
+   const foods = data.frames.map(f => f.total_food);
+   // reduce, not spread: a long run has one value per frame and spreading
+   // thousands of arguments risks a stack overflow.
+-  const maxPop = pops.reduce((a, b) => (b > a ? b : a), 1);
++  const band = (data.params || {}).pop_band;
++  // Scale to the band too, so its upper edge is visible even if the run never
++  // reaches it.
++  const maxPop = pops.reduce((a, b) => (b > a ? b : a), band ? band[1] * 1.1 : 1);
+   const maxFood = foods.reduce((a, b) => (b > a ? b : a), 1);
+   const x = i => pad + (i / Math.max(1, data.frames.length - 1)) * (W - pad * 2);
+ 
+@@ -405,6 +446,20 @@ function drawChart() {
+   ctx.strokeStyle = css("--line"); ctx.lineWidth = 1;
+   ctx.beginPath(); ctx.moveTo(pad, H - pad); ctx.lineTo(W - pad, H - pad); ctx.stroke();
+ 
++  // Target population band, on the population line's scale.
++  $("band-legend").hidden = !band;
++  if (band) {
++    const y = v => H - pad - (Math.min(v, maxPop) / maxPop) * (H - pad * 2);
++    ctx.fillStyle = css("--band");
++    ctx.fillRect(pad, y(band[1]), W - pad * 2, y(band[0]) - y(band[1]));
++    ctx.strokeStyle = css("--accent"); ctx.globalAlpha = 0.35; ctx.setLineDash([4, 4]);
++    for (const b of band) {
++      if (b > maxPop) continue;
++      ctx.beginPath(); ctx.moveTo(pad, y(b)); ctx.lineTo(W - pad, y(b)); ctx.stroke();
++    }
++    ctx.setLineDash([]); ctx.globalAlpha = 1;
++  }
++
+   const line = (vals, max, col) => {
+     ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath();
+     vals.forEach((v, i) => {
+@@ -422,8 +477,49 @@ function drawChart() {
+ 
+   ctx.fillStyle = css("--muted");
+   ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+-  ctx.fillText(`pop max ${maxPop}`, pad, 13);
++  ctx.fillText(`pop max ${Math.round(maxPop)}`, pad, 13);
+   ctx.fillText(`food max ${maxFood.toFixed(0)}`, pad + 90, 13);
++  if (band) ctx.fillText(`band ${band[0]}–${band[1]}`, pad + 190, 13);
++
++  if (data._hasActions) drawActions();
++}
++
++// Move cost over time as a step line, on the same x scale as the chart above
++// so the two read together: cost goes up, population comes down.
++function drawActions() {
++  const cv = $("actions"), ctx = cv.getContext("2d");
++  const W = cv.width, H = cv.height, pad = 26;
++  ctx.clearRect(0, 0, W, H);
++
++  const costs = (data.params || {}).move_costs;
++  const val = a => (costs ? costs[a] : a);
++  const maxV = costs ? costs[costs.length - 1] : data.frames.reduce((m, f) => Math.max(m, f.action ?? 0), 1);
++  const x = i => pad + (i / Math.max(1, data.frames.length - 1)) * (W - pad * 2);
++  const y = v => H - pad - (v / maxV) * (H - pad * 2);
++
++  // light gridlines at whole-number costs
++  ctx.strokeStyle = css("--grid-line"); ctx.lineWidth = 1;
++  ctx.fillStyle = css("--muted"); ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
++  for (let v = 0; v <= maxV; v++) {
++    ctx.beginPath(); ctx.moveTo(pad, y(v)); ctx.lineTo(W - pad, y(v)); ctx.stroke();
++    ctx.fillText(String(v), 6, y(v) + 4);
++  }
++
++  ctx.strokeStyle = css("--action"); ctx.lineWidth = 1.5; ctx.beginPath();
++  let started = false, prevY = 0;
++  data.frames.forEach((f, i) => {
++    if (f.action === undefined) return;
++    const yy = y(val(f.action));
++    if (!started) { ctx.moveTo(x(i - 1), yy); started = true; }
++    else ctx.lineTo(x(i - 1), prevY);
++    ctx.lineTo(x(i - 1), yy);
++    ctx.lineTo(x(i), yy);
++    prevY = yy;
++  });
++  ctx.stroke();
++
++  ctx.strokeStyle = css("--accent"); ctx.lineWidth = 1.5;
++  ctx.beginPath(); ctx.moveTo(x(frame), pad - 8); ctx.lineTo(x(frame), H - pad); ctx.stroke();
+ }
+ 
+ function renderMeta() {

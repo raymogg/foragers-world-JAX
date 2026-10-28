@@ -692,6 +692,22 @@ numbers masked-out elements too. Neither errors. The masks (`receives`,
 `has_partner`, `free`) are the only way to tell a real answer from a default.
 Making the junk an explicit -1 rather than a silent 0 is worth the line.
 
+THE MATRIX IS THE TEACHING VERSION, NOT THE FINAL ONE. Let them build it — it
+is the clearest way to see the pairing — but it is O(N^2) per step. Nothing
+errors and every answer is right; it is just slow. In this repo it was ~80% of
+rollout time (256 worlds x 500 steps: 8.3s -> 1.6s once replaced), and it went
+unnoticed until Level 10 because it was mistaken for jit recompilation. Have
+them time a batched rollout with `breed` stubbed out to find it. The O(N)
+version does the same pairing as a lookup plus a scatter:
+
+    free_slots = jnp.nonzero(free, size=N, fill_value=N)[0]  # k-th free slot
+    child_slot = jnp.where(is_parent, free_slots[parent_rank], N)
+    new_pos    = pos.at[child_slot].set(pos, mode="drop")    # N = out of bounds
+
+`size=` is what makes nonzero jit-able (fixed output shape), and the
+out-of-bounds index plus mode="drop" is the scatter version of the junk-index
+rule: the mask is folded into the index itself.
+
 THE CIRCULAR ORDERING — this WILL bite them. The capacity gate needs
 parent_rank, but parent_rank is a cumsum OF the parent mask. So:
 

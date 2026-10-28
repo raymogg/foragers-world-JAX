@@ -1,0 +1,13 @@
+band,policy,policy_label,before,in_band,above,below,lost
+wide,ppo_greedy,PPO (greedy),2.34765625,495.96484375,0.13671875,1.55078125,0.0
+wide,ppo_sampled,PPO (sampled),2.3515625,489.83984375,1.265625,6.54296875,0.0
+wide,best_fixed,Best fixed (cost 1.5),2.94921875,297.5546875,37.6796875,160.390625,1.42578125
+tight,ppo_greedy,PPO (greedy),7.19921875,270.390625,96.84765625,125.5625,0.0
+tight,ppo_sampled,PPO (sampled),6.9375,218.0078125,131.375,143.6796875,0.0
+tight,best_fixed,Best fixed (cost 1.5),5.3203125,65.59765625,295.34375,132.3125,1.42578125
+floor,ppo_greedy,PPO (greedy),0.0,348.98828125,30.0546875,0.0,120.95703125
+floor,ppo_sampled,PPO (sampled),0.0,239.3203125,23.4609375,0.0,237.21875
+floor,best_fixed,Best fixed (cost 1.75),0.0,83.60546875,215.36328125,0.0,201.03125
+ceiling,ppo_greedy,PPO (greedy),3.38671875,448.1875,24.40234375,24.0234375,0.0
+ceiling,ppo_sampled,PPO (sampled),3.37890625,419.8359375,38.8046875,37.98046875,0.0
+ceiling,best_fixed,Best fixed (cost 1.25),4.5390625,202.95703125,158.64453125,133.859375,0.0

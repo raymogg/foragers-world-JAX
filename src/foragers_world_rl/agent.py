@@ -36,8 +36,7 @@ from foragers_world_rl.world import (
     MAX_FOOD_PER_TILE,
     MAX_POPULATION,
     MOVE_COSTS,
-    POP_BAND_HIGH,
-    POP_BAND_LOW,
+    DEFAULT_BAND,
     env_step,
     init_env_state,
     observe,
@@ -81,7 +80,7 @@ POLICIES: dict[str, tuple] = {
 # ---------------------------------------------------------------------- rollout
 
 
-def rollout(policy_fn, params, key: jax.Array):
+def rollout(policy_fn, params, key: jax.Array, band=DEFAULT_BAND):
     """One episode under `policy_fn`. Returns the per-step trajectory.
 
     Observe, act, then step -- in that order, so the obs stored alongside an
@@ -94,7 +93,7 @@ def rollout(policy_fn, params, key: jax.Array):
 
         obs = observe(state)
         action = policy_fn(params, obs, act_key)
-        state, _obs_after, reward, done = env_step(state, action, env_key)
+        state, _obs_after, reward, done = env_step(state, action, env_key, band)
 
         return state, (obs, action, reward, done, state.foragers.population)
 
@@ -112,15 +111,23 @@ def rollout(policy_fn, params, key: jax.Array):
         "pops": pops,          # (STEPS,)
     }
 
+batched_rollout = jax.jit(
+    jax.vmap(rollout, in_axes=(None, None, 0, None)), static_argnums=(0,)
+)
 
-def evaluate(policy_fn, params, seed: int = 0, worlds: int = 256) -> dict:
+
+def evaluate(policy_fn, params, seed: int = 0, worlds: int = 256,
+             band=DEFAULT_BAND) -> dict:
     """Run `worlds` independent episodes in parallel and summarise them."""
-    batched = jax.jit(jax.vmap(rollout, in_axes=(None, None, 0)), static_argnums=(0,))
     keys = jax.random.split(jax.random.key(seed), worlds)
-    traj = batched(policy_fn, params, keys)
+    traj = batched_rollout(policy_fn, params, keys, jnp.asarray(band))
 
     # Reward is 1 per in-band step, so an episode's return is its in-band count.
-    returns = traj["rewards"].sum(axis=1)       # (worlds,)
+    # scan keeps stepping a world after its episode ends, so only count rewards
+    # up to and including the first done. Without this, a band that contains 0
+    # scores an extinct world as in-band for every remaining step.
+    ended_before = (jnp.cumsum(traj["dones"], axis=1) - traj["dones"]) > 0
+    returns = jnp.where(ended_before, 0.0, traj["rewards"]).sum(axis=1)  # (worlds,)
     # scan has a fixed trip count, so a world that dies keeps getting stepped.
     # Check whether population EVER hit zero, not just where it ended -- a dead
     # population stays dead, but reading only the last step would also count a
@@ -145,15 +152,21 @@ def evaluate(policy_fn, params, seed: int = 0, worlds: int = 256) -> dict:
 
 
 def record(
-    policy_fn, params, seed: int, out: Path, label: str, steps: int = EPISODE_STEPS
+    policy_fn, params, seed: int, out: Path, label: str, steps: int = EPISODE_STEPS,
+    band=DEFAULT_BAND, world: int = 0, worlds: int = 256,
 ) -> Path:
     """Replay one episode eagerly, snapshotting each step for the web viewer.
 
     Deliberately outside scan: the Recorder builds Python lists and dicts, so
     it cannot be traced. Slow, but it is one episode.
+
+    Replays world `world` of `evaluate(..., seed, worlds)` exactly: the keys are
+    derived the same way as in `evaluate` and `rollout`, so the recording is one
+    of the episodes the scores came from, not a lookalike.
     """
-    key = jax.random.key(seed)
-    key, init_key = jax.random.split(key)
+    world_key = jax.random.split(jax.random.key(seed), worlds)[world]
+    init_key, scan_key = jax.random.split(world_key)
+    step_keys = jax.random.split(scan_key, EPISODE_STEPS)
     state = init_env_state(init_key)
 
     rec = Recorder(
@@ -163,6 +176,8 @@ def record(
         params={
             "policy": label,
             "seed": seed,
+            "world": world,
+            "worlds": worlds,
             "grid_size": GRID_SIZE,
             "max_population": MAX_POPULATION,
             "initial_population": INITIAL_POPULATION,
@@ -170,23 +185,22 @@ def record(
             "food_regrowth": FOOD_REGROWTH_RATE,
             "max_food_per_tile": MAX_FOOD_PER_TILE,
             "move_costs": [float(c) for c in MOVE_COSTS],
-            "pop_band": [POP_BAND_LOW, POP_BAND_HIGH],
+            "pop_band": [int(band[0]), int(band[1])],
             "episode_steps": EPISODE_STEPS,
         },
     )
     rec.snapshot(state.world, state.foragers)  # frame 0 = initial state
 
     total_reward = 0.0
-    for _ in range(steps):
-        key, step_key = jax.random.split(key)
+    for step_key in step_keys[:steps]:
         act_key, env_key = jax.random.split(step_key)
 
         obs = observe(state)
         action = policy_fn(params, obs, act_key)
-        state, _obs, reward, done = env_step(state, action, env_key)
+        state, _obs, reward, done = env_step(state, action, env_key, band)
 
         total_reward += float(reward)
-        rec.snapshot(state.world, state.foragers)
+        rec.snapshot(state.world, state.foragers, action=action, reward=reward)
         if bool(done):
             break
 
@@ -227,11 +241,13 @@ def main() -> None:
         default=EPISODE_STEPS,
         help="steps to record; fewer keeps the JSON small",
     )
+    ap.add_argument("--band", type=int, nargs=2, default=DEFAULT_BAND,
+                    metavar=("LOW", "HIGH"), help="target population band, inclusive")
     a = ap.parse_args()
 
     if a.policy is None:
         print("policies:", ", ".join(POLICIES))
-        print(f"\nband {POP_BAND_LOW}-{POP_BAND_HIGH}, {EPISODE_STEPS} steps, "
+        print(f"\nband {a.band[0]}-{a.band[1]}, {EPISODE_STEPS} steps, "
               f"{N_ACTIONS} actions (move costs "
               f"{float(MOVE_COSTS[0]):g}..{float(MOVE_COSTS[-1]):g})")
         return
@@ -239,7 +255,7 @@ def main() -> None:
     if a.policy == "all":
         rows = []
         for name, (fn, params) in POLICIES.items():
-            stats = evaluate(fn, params, seed=a.seed, worlds=a.worlds)
+            stats = evaluate(fn, params, seed=a.seed, worlds=a.worlds, band=a.band)
             rows.append((name, stats))
         rows.sort(key=lambda r: -r[1]["mean_return"])
         print(f"{'policy':>12} {'return':>14} {'extinct':>8} {'final pop':>10}")
@@ -256,9 +272,9 @@ def main() -> None:
         ap.error(f"unknown policy {a.policy!r}; choose from {', '.join(POLICIES)}")
 
     fn, params = POLICIES[a.policy]
-    report(a.policy, evaluate(fn, params, seed=a.seed, worlds=a.worlds))
+    report(a.policy, evaluate(fn, params, seed=a.seed, worlds=a.worlds, band=a.band))
     if a.record:
-        record(fn, params, a.seed, a.record, a.policy, steps=a.record_steps)
+        record(fn, params, a.seed, a.record, a.policy, steps=a.record_steps, band=a.band)
 
 
 if __name__ == "__main__":

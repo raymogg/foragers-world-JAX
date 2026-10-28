@@ -10,7 +10,7 @@ Python that runs between steps.
     rec = Recorder(grid_size=GRID_SIZE, max_population=MAX_POPULATION)
     for i in range(steps):
         ...                          # advance the sim
-        rec.snapshot(world, foragers)
+        rec.snapshot(world, foragers, action=action, reward=reward)
     rec.save("runs/my_run.json")
 
 Only ALIVE foragers are written per frame, so the file stays small when the
@@ -47,8 +47,12 @@ class Recorder:
         self._prev_food: np.ndarray | None = None
 
     # --- recording -----------------------------------------------------------
-    def snapshot(self, world, foragers) -> None:
+    def snapshot(self, world, foragers, action=None, reward=None) -> None:
         """Append one frame. Call once per simulation step.
+
+        `action` and `reward` are for the step that PRODUCED this frame, so the
+        initial frame has neither. The viewer maps the action index to a move
+        cost via params["move_costs"].
 
         Converts JAX arrays to plain Python via numpy. That forces the
         computation to complete, so recording every step of a long run is
@@ -81,6 +85,11 @@ class Recorder:
                 for s in idx
             ],
         }
+
+        if action is not None:
+            frame["action"] = int(action)
+        if reward is not None:
+            frame["reward"] = float(reward)
 
         # Food is delta-encoded. On a 100x100 grid only a handful of cells change
         # per step, so writing the whole grid every frame is ~96% waste. Frame 0

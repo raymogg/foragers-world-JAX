@@ -1,0 +1,53 @@
+# Band sweep: how well does basic PPO control the population for different
+# target bands?
+#
+#   uv run foragers-experiment experiments/band_sweep.toml
+#
+# Every key here is recorded, together with the git commit and the resolved
+# PPO config, in <output_dir>/meta.json. Copy this file to start a new
+# experiment rather than editing it, so old results keep a matching config.
+
+name = "band_sweep"
+description = """
+Basic PPO (3 global observations, 12 discrete move costs) trained separately
+on four target population bands: a wide default, a tight band, one near the
+floor and one near the ceiling. Compared against the best fixed action and
+uniform random on the same 256 evaluation worlds.
+"""
+output_dir = "results/band_sweep"
+
+# Target bands, inclusive [low, high]. One PPO policy is trained per band.
+[bands]
+wide = [80, 140]
+tight = [75, 85]
+floor = [0, 30]
+ceiling = [120, 154]
+
+[train]
+seed = 0
+
+# Overrides for ppo.CONFIG. Anything not listed uses the default, and the
+# resolved values are written to meta.json.
+[train.ppo]
+total_timesteps = 5_000_000
+
+[eval]
+seed = 0
+worlds = 256
+# Raw per-step data is saved for each of these. best_fixed is chosen per band
+# by scoring every fixed action; all fixed actions appear in summary.csv.
+policies = ["ppo_greedy", "ppo_sampled", "best_fixed", "random"]
+
+# Episodes to save in the web viewer's format. `which` picks a world from the
+# evaluation by return: median, worst or best.
+[[record]]
+policy = "ppo_greedy"
+which = "median"
+
+[[record]]
+policy = "ppo_greedy"
+which = "worst"
+
+[[record]]
+policy = "best_fixed"
+which = "median"

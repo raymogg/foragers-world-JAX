@@ -10,7 +10,7 @@ it and they survive and breed.
 
 **Built end-to-end in JAX:** pure functional `env_step`, `vmap` over the
 population and over parallel worlds, `lax.scan` over episode steps, `jit`
-throughout. 256 worlds x 500 steps runs in about a second.
+throughout. 256 worlds x 500 steps runs in about 1.5 seconds on CPU.
 
 ## Setup
 
@@ -24,11 +24,16 @@ uv sync
 
 ```bash
 uv run python src/foragers_world_rl/world.py   # one episode, fixed action
-uv run python tests/test_world.py              # the test suite
+uv run python tests/test_world.py              # environment tests
+uv run python tests/test_ppo.py                # GAE / policy tests
+uv run python tests/test_experiments.py        # experiment metrics
 
 uv run foragers-world-rl                       # list policies
 uv run foragers-world-rl random                # score a policy over 256 worlds
 uv run foragers-world-rl all                   # rank every policy
+
+uv run foragers-ppo                            # train PPO (~2 min on CPU), then score it
+uv run foragers-ppo --load runs/ppo_params.pkl --record runs/ppo.json
 ```
 
 `agent.py` holds the policies and the shared rollout. A policy is a pure
@@ -51,7 +56,8 @@ from the batched evaluation: `--worlds` runs N episodes in parallel to get a
 score, while `--record` writes one watchable trajectory.
 
 The viewer is a single static HTML file with no build step. It shows the food
-grid, foragers sized by energy, a population/food chart, and a scrubber. The
+grid, foragers sized by energy, a population/food chart with the target band,
+the move cost the policy chose at each step, and a scrubber. The
 dropdown lists whatever is in `runs/`, or you can drag any trajectory JSON onto
 the page — that works without the server too. `runs/sample.json` is checked in
 as an example.
@@ -86,21 +92,98 @@ Mean return over 256 parallel worlds, 500 steps, out of a possible 500:
 
 | policy | return | extinct |
 | --- | --- | --- |
+| **PPO, greedy** (5M steps, ~2 min CPU) | **496** | 0% |
+| PPO, sampled | 490 | 0% |
 | best fixed action (cost 1.50) | 298 | 0% |
 | second-best fixed (cost 1.25) | 247 | 0% |
 | uniform random | 38 | 94% |
 | anything above cost 2.0 | 0 | 100% |
 
-Reproduce with `uv run foragers-world-rl all`.
+Reproduce the baselines with `uv run foragers-world-rl all` and PPO with
+`uv run foragers-ppo`. Every row is scored by the same `evaluate` (seed 0).
 
 A learned policy has to beat **298** to show it is reacting to the observation
 rather than settling on one action. The population oscillates under every fixed
 action, so there is real headroom between 298 and 500.
 
+PPO closes nearly all of it: it learns a reactive controller that switches
+between costs 1.0 and 1.75 depending on the observation, and the few steps it
+misses are the start of the episode, while the population grows from 16 into
+the band. In other words, this version of the task is solved, and the
+interesting work now is making it harder (below).
+
+## PPO
+
+`ppo.py` follows [PureJaxRL](https://github.com/luchris429/purejaxrl)'s
+structure: one jitted `update` collects 128 steps from 256 worlds under
+`scan`/`vmap`, computes GAE with a reverse `scan`, and runs 4 epochs of
+minibatch PPO, all on device. The network is a hand-written MLP (a dict of
+arrays) and the optimiser is optax. Two choices worth knowing about:
+
+- **Truncation is not death.** Extinction is terminal, but hitting the 500-step
+  limit bootstraps from the value of the final observation: the observation has
+  no clock in it, so the critic cannot see an end coming.
+- **Rewards are scaled by `1 - gamma`** during training, so value targets sit in
+  [0, 1] and PureJaxRL's value-clipping range of 0.2 is sensible.
+
+## Experiments
+
+Experiments are driven by TOML files in `experiments/`, so each one has a
+fixed, versioned config:
+
+```bash
+uv run foragers-experiment experiments/band_sweep.toml              # train + evaluate
+uv run foragers-experiment experiments/band_sweep.toml --skip-train # re-evaluate saved params
+```
+
+To try something new, copy a config rather than editing it, so existing
+results keep a matching config. Each run writes to the config's `output_dir`:
+
+| file | contents |
+| --- | --- |
+| `config.toml` | the exact config that was run |
+| `meta.json` | resolved PPO settings, env constants, git commit, library versions |
+| `git.diff` | uncommitted changes, if the working tree was dirty |
+| `summary.csv` | one row per (band, policy), including every fixed action |
+| `episodes.csv` | one row per (band, policy, world): return, steps in/out of band, steps to enter, max overshoot/undershoot after entry, extinction, action stats |
+| `training/<band>.csv` | PPO learning curve, one row per update |
+| `raw/<band>__<policy>.npz` | per-step population, action, reward, done, live mask and observation for every evaluated world |
+| `params/<band>.pkl` | trained weights |
+| `episodes/*.json` | selected episodes in the viewer's format |
+
+The recorded episodes are the same worlds that were scored, not lookalikes
+(`record(world=i)` reuses `evaluate`'s keys), so an episode shown alongside
+the numbers is one of the episodes behind them. To browse them:
+
+```bash
+uv run python -m http.server
+# localhost:8000/viewer/?dir=../results/band_sweep/episodes/
+```
+
+Figures and web exports for a finished experiment:
+
+```bash
+uv run --group plots foragers-plots results/band_sweep        # figures/ + figures/data/*.csv
+uv run python src/foragers_world_rl/export_web.py results/band_sweep/web \
+    --experiment results/band_sweep                            # compact episodes for a website
+```
+
+`foragers-plots` writes every figure in light and dark, as PNG and SVG, plus a
+CSV of exactly what each one plots. `export_web.py --experiment` converts the
+recorded episodes into the compact web format (about 880 KB each, from 3-5 MB)
+with the per-step action and reward added, and writes an `index.json` with each
+episode's metrics. `episodes/` and `web/` are gitignored, since both can be
+regenerated from the committed params.
+
+### Band sweep
+
+`experiments/band_sweep.toml` trains PPO separately on four target bands
+(wide 80-140, tight 75-85, floor 0-30, ceiling 120-154) and compares greedy
+and sampled PPO against the best fixed action and random play on the same 256
+worlds.
+
 ## Not built yet
 
-- **PPO.** The policy interface and the batched rollout are in place; the
-  learning is not. This is the next piece of work.
 - Heritable traits (speed, vision) with mutation
 - Spatial actions — poison or plant food in one region rather than a global knob.
   `World.poison` exists as a field and is carried through untouched; nothing

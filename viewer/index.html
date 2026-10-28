@@ -16,6 +16,8 @@
     --food: #7cb342;
     --forager: #d94f3d;
     --grid-line: #eceae6;
+    --action: #7c3aed;
+    --band: rgba(37, 99, 235, 0.08);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -28,6 +30,8 @@
       --food: #8fc94f;
       --forager: #f0705c;
       --grid-line: #2a2c31;
+      --action: #a78bfa;
+      --band: rgba(91, 142, 245, 0.12);
     }
   }
   * { box-sizing: border-box; }
@@ -92,6 +96,7 @@
   .stat { background: var(--panel); padding: 11px 13px; }
   .stat .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
   .stat .v { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .stat .v small { font-size: 12px; font-weight: 400; color: var(--muted); }
 
   .legend { display: flex; gap: 14px; margin-top: 12px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -167,6 +172,16 @@
         <div class="legend">
           <span><i class="swatch" style="background:var(--forager)"></i> population</span>
           <span><i class="swatch" style="background:var(--food)"></i> total food</span>
+          <span id="band-legend" hidden><i class="swatch" style="background:var(--band);outline:1px solid var(--accent)"></i> target band</span>
+          <span><i class="swatch" style="background:var(--accent)"></i> current step</span>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:18px" id="action-panel" hidden>
+        <h2>Agent action (move cost)</h2>
+        <canvas id="actions" width="900" height="140"></canvas>
+        <div class="legend">
+          <span><i class="swatch" style="background:var(--action)"></i> move cost chosen each step</span>
           <span><i class="swatch" style="background:var(--accent)"></i> current step</span>
         </div>
       </div>
@@ -180,6 +195,8 @@
           <div class="stat"><div class="k">Mean energy</div><div class="v" id="s-energy">—</div></div>
           <div class="stat"><div class="k">Total food</div><div class="v" id="s-food">—</div></div>
           <div class="stat"><div class="k">Step</div><div class="v" id="s-step">—</div></div>
+          <div class="stat action-stat"><div class="k">Move cost</div><div class="v" id="s-cost">—</div></div>
+          <div class="stat action-stat"><div class="k">Return so far</div><div class="v" id="s-return">—</div></div>
         </div>
       </div>
 
@@ -226,6 +243,13 @@ function load(json, name) {
   }
   data = json;
   expandFood(data);
+  // Action and reward belong to the step that produced a frame, so frame 0 has
+  // neither. Older recordings have none at all: hide the action UI for those.
+  data._hasActions = data.frames.some(f => f.action !== undefined);
+  let ret = 0;
+  data._return = data.frames.map(f => (ret += f.reward ?? 0));
+  $("action-panel").hidden = !data._hasActions;
+  for (const el of document.querySelectorAll(".action-stat")) el.hidden = !data._hasActions;
   frame = 0;
   $("empty").hidden = true;
   $("app").hidden = false;
@@ -251,10 +275,17 @@ $("file").addEventListener("change", e => {
 // http.server returns an HTML directory listing, so scrape the .json links out
 // of it. Fails quietly when opened as a file:// page -- the file picker and
 // drag-and-drop still work.
+//
+// ?dir= points it somewhere else, e.g. an experiment's episodes:
+//   localhost:8000/viewer/?dir=../results/band_sweep/episodes/
+const RUNS_DIR = (() => {
+  const d = new URLSearchParams(location.search).get("dir") || "../runs/";
+  return d.endsWith("/") ? d : d + "/";
+})();
 async function findRuns() {
   const sel = $("preset");
   try {
-    const res = await fetch("../runs/");
+    const res = await fetch(RUNS_DIR);
     if (!res.ok) throw new Error("HTTP " + res.status);
     const doc = new DOMParser().parseFromString(await res.text(), "text/html");
     const names = [...doc.querySelectorAll("a")]
@@ -268,11 +299,11 @@ async function findRuns() {
     }
     for (const n of names) {
       const o = document.createElement("option");
-      o.value = "../runs/" + n;
+      o.value = RUNS_DIR + n;
       o.textContent = n;
       sel.appendChild(o);
     }
-    sel.options[0].textContent = `— pick a run from runs/ (${names.length}) —`;
+    sel.options[0].textContent = `— pick a run from ${RUNS_DIR.replace(/^\.\.\//, "")} (${names.length}) —`;
   } catch {
     sel.options[0].textContent = "— serve over http to list runs/ —";
   }
@@ -381,6 +412,13 @@ function render() {
   $("s-energy").textContent = f.mean_energy.toFixed(2);
   $("s-food").textContent = f.total_food.toFixed(1);
   $("s-step").textContent = f.step;
+  if (data._hasActions) {
+    const costs = (data.params || {}).move_costs;
+    $("s-cost").innerHTML = f.action === undefined ? "—"
+      : costs ? `${costs[f.action].toFixed(2)} <small>action ${f.action}</small>`
+      : `action ${f.action}`;
+    $("s-return").innerHTML = `${data._return[frame]} <small>/ ${frame}</small>`;
+  }
   $("steplabel").textContent = `step ${frame} / ${data.frames.length - 1}`;
   $("scrub").value = frame;
   $("back").disabled = frame === 0;
@@ -397,13 +435,30 @@ function drawChart() {
   const foods = data.frames.map(f => f.total_food);
   // reduce, not spread: a long run has one value per frame and spreading
   // thousands of arguments risks a stack overflow.
-  const maxPop = pops.reduce((a, b) => (b > a ? b : a), 1);
+  const band = (data.params || {}).pop_band;
+  // Scale to the band too, so its upper edge is visible even if the run never
+  // reaches it.
+  const maxPop = pops.reduce((a, b) => (b > a ? b : a), band ? band[1] * 1.1 : 1);
   const maxFood = foods.reduce((a, b) => (b > a ? b : a), 1);
   const x = i => pad + (i / Math.max(1, data.frames.length - 1)) * (W - pad * 2);
 
   // axes
   ctx.strokeStyle = css("--line"); ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(pad, H - pad); ctx.lineTo(W - pad, H - pad); ctx.stroke();
+
+  // Target population band, on the population line's scale.
+  $("band-legend").hidden = !band;
+  if (band) {
+    const y = v => H - pad - (Math.min(v, maxPop) / maxPop) * (H - pad * 2);
+    ctx.fillStyle = css("--band");
+    ctx.fillRect(pad, y(band[1]), W - pad * 2, y(band[0]) - y(band[1]));
+    ctx.strokeStyle = css("--accent"); ctx.globalAlpha = 0.35; ctx.setLineDash([4, 4]);
+    for (const b of band) {
+      if (b > maxPop) continue;
+      ctx.beginPath(); ctx.moveTo(pad, y(b)); ctx.lineTo(W - pad, y(b)); ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
 
   const line = (vals, max, col) => {
     ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath();
@@ -422,8 +477,49 @@ function drawChart() {
 
   ctx.fillStyle = css("--muted");
   ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
-  ctx.fillText(`pop max ${maxPop}`, pad, 13);
+  ctx.fillText(`pop max ${Math.round(maxPop)}`, pad, 13);
   ctx.fillText(`food max ${maxFood.toFixed(0)}`, pad + 90, 13);
+  if (band) ctx.fillText(`band ${band[0]}–${band[1]}`, pad + 190, 13);
+
+  if (data._hasActions) drawActions();
+}
+
+// Move cost over time as a step line, on the same x scale as the chart above
+// so the two read together: cost goes up, population comes down.
+function drawActions() {
+  const cv = $("actions"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, pad = 26;
+  ctx.clearRect(0, 0, W, H);
+
+  const costs = (data.params || {}).move_costs;
+  const val = a => (costs ? costs[a] : a);
+  const maxV = costs ? costs[costs.length - 1] : data.frames.reduce((m, f) => Math.max(m, f.action ?? 0), 1);
+  const x = i => pad + (i / Math.max(1, data.frames.length - 1)) * (W - pad * 2);
+  const y = v => H - pad - (v / maxV) * (H - pad * 2);
+
+  // light gridlines at whole-number costs
+  ctx.strokeStyle = css("--grid-line"); ctx.lineWidth = 1;
+  ctx.fillStyle = css("--muted"); ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+  for (let v = 0; v <= maxV; v++) {
+    ctx.beginPath(); ctx.moveTo(pad, y(v)); ctx.lineTo(W - pad, y(v)); ctx.stroke();
+    ctx.fillText(String(v), 6, y(v) + 4);
+  }
+
+  ctx.strokeStyle = css("--action"); ctx.lineWidth = 1.5; ctx.beginPath();
+  let started = false, prevY = 0;
+  data.frames.forEach((f, i) => {
+    if (f.action === undefined) return;
+    const yy = y(val(f.action));
+    if (!started) { ctx.moveTo(x(i - 1), yy); started = true; }
+    else ctx.lineTo(x(i - 1), prevY);
+    ctx.lineTo(x(i - 1), yy);
+    ctx.lineTo(x(i), yy);
+    prevY = yy;
+  });
+  ctx.stroke();
+
+  ctx.strokeStyle = css("--accent"); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x(frame), pad - 8); ctx.lineTo(x(frame), H - pad); ctx.stroke();
 }
 
 function renderMeta() {

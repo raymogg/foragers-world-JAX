@@ -1,0 +1,17 @@
+metric,band,policy,policy_label,n,mean,p10,p25,median,p75,p90,max
+max_overshoot,wide,ppo_greedy,PPO (greedy),256,0.41015625,0.0,0.0,0.0,0.0,0.0,15.0
+max_overshoot,wide,best_fixed,Best fixed (cost 1.5),256,47.44140625,29.0,36.75,46.0,57.0,67.0,96.0
+max_overshoot,tight,ppo_greedy,PPO (greedy),256,22.04296875,16.5,19.0,21.0,25.0,28.0,42.0
+max_overshoot,tight,best_fixed,Best fixed (cost 1.5),256,102.44140625,84.0,91.75,101.0,112.0,122.0,151.0
+max_overshoot,floor,ppo_greedy,PPO (greedy),256,24.35546875,18.0,20.0,23.0,26.0,32.0,63.0
+max_overshoot,floor,best_fixed,Best fixed (cost 1.75),256,75.94921875,52.0,63.75,76.0,89.0,97.0,126.0
+max_overshoot,ceiling,ppo_greedy,PPO (greedy),256,23.41796875,14.0,18.0,22.0,28.0,34.0,58.0
+max_overshoot,ceiling,best_fixed,Best fixed (cost 1.25),256,83.37109375,64.0,73.0,84.0,96.0,102.0,102.0
+max_undershoot,wide,ppo_greedy,PPO (greedy),256,3.0234375,0.0,0.0,2.0,5.0,7.0,17.0
+max_undershoot,wide,best_fixed,Best fixed (cost 1.5),256,54.07421875,43.0,48.0,53.0,61.0,67.0,80.0
+max_undershoot,tight,ppo_greedy,PPO (greedy),256,16.75,13.0,15.0,16.0,18.0,20.0,38.0
+max_undershoot,tight,best_fixed,Best fixed (cost 1.5),256,49.0703125,38.0,43.0,48.0,56.0,62.0,75.0
+max_undershoot,floor,ppo_greedy,PPO (greedy),256,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+max_undershoot,floor,best_fixed,Best fixed (cost 1.75),256,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+max_undershoot,ceiling,ppo_greedy,PPO (greedy),256,15.4765625,9.0,11.0,14.0,18.0,24.0,53.0
+max_undershoot,ceiling,best_fixed,Best fixed (cost 1.25),256,56.640625,44.0,49.0,56.0,64.0,70.5,94.0
