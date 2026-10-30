@@ -1,0 +1,45 @@
+# Floor band with a growth observation: does seeing the population's rate of
+# change stop the early crash to zero?
+#
+#   uv run foragers-experiment experiments/floor_growth_obs.toml
+#
+# Compare against the floor band in results/band_sweep. Everything is identical
+# (training seed, PPO settings, the 256 evaluation worlds) except that the
+# agent also observes `growth`: (population - previous population) / previous,
+# which lies in [-1, 1].
+
+name = "floor_growth_obs"
+description = """
+Floor band (0-30) trained with one extra observation, the population's
+fractional change since the last step. Baseline: the floor band in band_sweep
+(same seed and settings, 3 observations), which scored 349.0 greedy with 27%
+of worlds extinct, 82% of those within the first 20 steps.
+"""
+output_dir = "results/floor_growth_obs"
+
+[bands]
+floor = [0, 30]
+
+[train]
+seed = 0
+
+[train.ppo]
+total_timesteps = 5_000_000
+obs_features = ["food", "population", "energy", "growth"]
+
+[eval]
+seed = 0
+worlds = 256
+policies = ["ppo_greedy", "ppo_sampled", "best_fixed", "random"]
+
+[[record]]
+policy = "ppo_greedy"
+which = "median"
+
+[[record]]
+policy = "ppo_greedy"
+which = "worst"
+
+[[record]]
+policy = "best_fixed"
+which = "median"

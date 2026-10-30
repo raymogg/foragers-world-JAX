@@ -462,6 +462,50 @@ def test_recorder_handles_extinction():
     assert rec.frames[0]["mean_energy"] == 0.0
 
 
+def test_growth_observation_is_fractional_change():
+    """obs[growth] = (pop - previous pop) / previous pop, and 0 at the start."""
+    from foragers_world_rl.world import OBS_FEATURES, env_step, init_env_state, observe
+
+    g = OBS_FEATURES.index("growth")
+    p = OBS_FEATURES.index("population")
+    state = init_env_state(jax.random.key(0))
+    assert float(observe(state)[g]) == 0.0, "growth should start at 0"
+
+    prev = int(state.foragers.population)
+    state, obs, _, _ = env_step(state, 6, jax.random.key(1))
+    now = int(state.foragers.population)
+    assert prev != now, "test needs a step where the population changes"
+    assert abs(float(obs[g]) - (now - prev) / prev) < 1e-6, (float(obs[g]), prev, now)
+    assert abs(float(obs[p]) * MAX_POPULATION - now) < 1e-3
+
+
+def test_growth_observation_is_bounded():
+    """At most one child per forager per step, so growth stays within [-1, 1]."""
+    from foragers_world_rl.world import OBS_FEATURES, env_step, init_env_state
+
+    g = OBS_FEATURES.index("growth")
+    state = init_env_state(jax.random.key(2))
+    for i in range(60):
+        # alternate free movement and a harsh cost to force booms and crashes
+        state, obs, _, _ = env_step(state, 0 if i % 10 < 5 else 10, jax.random.key(100 + i))
+        assert -1.0 <= float(obs[g]) <= 1.0, f"step {i}: growth {float(obs[g])}"
+
+
+def test_population_band_observation():
+    """population_band is 0 at the band floor and 1 at the top."""
+    from foragers_world_rl.world import OBS_FEATURES, init_env_state, observe
+
+    i = OBS_FEATURES.index("population_band")
+    state = init_env_state(jax.random.key(0))   # population 16
+    assert abs(float(observe(state, (0, 32))[i]) - 0.5) < 1e-6
+    assert abs(float(observe(state, (16, 48))[i]) - 0.0) < 1e-6
+    assert abs(float(observe(state, (8, 16))[i]) - 1.0) < 1e-6
+    # The other features do not depend on the band.
+    a, b = observe(state, (0, 30)), observe(state, (80, 140))
+    others = [k for k, f in enumerate(OBS_FEATURES) if f != "population_band"]
+    assert jnp.allclose(a[jnp.array(others)], b[jnp.array(others)])
+
+
 def test_recorder_records_action_and_reward():
     """The initial frame has no action; later frames carry the one that made them.
 

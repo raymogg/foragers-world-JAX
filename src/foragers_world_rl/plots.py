@@ -160,47 +160,58 @@ def shade_band(ax, band, t, axis="y"):
 # draws. Returning rows keeps the data next to the drawing that uses it.
 
 
-def fig_returns(e: Exp, t, out, theme):
-    """Mean return per band x policy, with the 10th-90th percentile range."""
-    rows = []
-    for band in e.bands:
-        for p in POLICIES:
-            r = e.ep(band, p, "return")
-            rows.append({"band": band, "band_low": e.bands[band][0], "band_high": e.bands[band][1],
-                         "policy": p, "policy_label": e.policy_label(band, p),
-                         "mean_return": r.mean(), "p10": np.percentile(r, 10),
-                         "median": np.median(r), "p90": np.percentile(r, 90),
-                         "min": r.min(), "max": r.max(),
-                         "extinct_frac": e.ep(band, p, "extinct").mean()})
+BAND_NAMES = {"wide": "Wide", "tight": "Tight", "floor": "Floor", "ceiling": "Ceiling"}
 
+
+def band_label(e: Exp, band) -> str:
+    lo, hi = e.bands[band]
+    return f"{BAND_NAMES.get(band, band.title())} band\n{lo}–{hi}"
+
+
+def plain_title(fig, ax, title, t, y=0.97):
+    """A plain descriptive title, flush with the plot area's left edge."""
+    fig.text(ax.get_position().x0, y, title, ha="left", va="top", fontsize=13,
+             fontweight="semibold", color=t["ink"])
+
+
+def fig_returns(e: Exp, t, out, theme):
+    """Mean return per band: PPO (greedy) vs the best fixed action. One idea, two bars."""
     bands = list(e.bands)
-    fig, ax = plt.subplots(figsize=(8, 0.95 * len(bands) + 1.2))
-    offs = {"ppo_greedy": -0.22, "ppo_sampled": 0.0, "best_fixed": 0.22}
-    for i, band in enumerate(bands):
-        for p in POLICIES:
-            r = next(x for x in rows if x["band"] == band and x["policy"] == p)
-            y = i + offs[p]
-            ax.plot([r["p10"], r["p90"]], [y, y], color=t[p], lw=2, alpha=0.45,
-                    solid_capstyle="round")
-            ax.plot(r["mean_return"], y, "o", ms=7, color=t[p],
-                    markeredgecolor=t["surface"], markeredgewidth=1.5, zorder=3,
-                    label=POLICY_LABEL[p] if i == 0 else None)
-            pct = round(100 * r["extinct_frac"])
-            ext = f"  · {pct}% extinct" if pct >= 1 else ""
-            ax.text(max(r["p90"], r["mean_return"]) + 6, y, f"{r['mean_return']:.0f}{ext}",
-                    va="center", fontsize=8.5, color=t["ink2"])
-    ax.set_yticks(range(len(bands)), [e.band_title(b) for b in bands])
-    ax.invert_yaxis()
-    ax.set_xlim(0, 560)
-    ax.set_xticks(range(0, 501, 100))
-    ax.axvline(STEPS, color=t["axis"], lw=1, ls=(0, (2, 2)))
-    ax.text(STEPS, -0.6, "max 500", ha="center", fontsize=8, color=t["muted"])
-    ax.set_xlabel("Return (steps in band, of 500)  ·  dot = mean, line = 10th–90th percentile")
-    ax.grid(axis="y", visible=False)
-    ax.tick_params(axis="y", length=0, labelcolor=t["ink"])
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=3)
-    suptitle(fig, "PPO beats the best fixed action in every band",
-             "Mean return over 256 evaluation worlds per band", t)
+    rows = []
+    for band in bands:
+        ppo = e.ep(band, "ppo_greedy", "return").mean()
+        fixed = e.ep(band, "best_fixed", "return").mean()
+        rows.append({"band": band, "band_low": e.bands[band][0], "band_high": e.bands[band][1],
+                     "ppo_mean_return": round(ppo, 1), "best_fixed_mean_return": round(fixed, 1),
+                     "best_fixed_policy": e.best_fixed[band],
+                     "best_fixed_cost": float(e.costs[int(e.best_fixed[band].split(":")[1])])})
+
+    fig = plt.figure(figsize=(8, 4.8))
+    ax = fig.add_axes((0.09, 0.17, 0.89, 0.64))
+    x = np.arange(len(bands))
+    w = 0.36
+    series = [("ppo_greedy", "ppo_mean_return", "PPO agent"),
+              ("best_fixed", "best_fixed_mean_return", "Best fixed move cost")]
+    for k, (color, col, label) in enumerate(series):
+        # Bars sit symmetrically either side of the band's tick: -w/2 and +w/2.
+        xs = x + (k - 0.5) * w
+        vals = [r[col] for r in rows]
+        ax.bar(xs, vals, width=w * 0.92, color=t[color], label=label, zorder=2)
+        for xx, v in zip(xs, vals):
+            ax.text(xx, v + 8, f"{v:.0f}", ha="center", va="bottom", fontsize=10,
+                    color=t["ink"])
+    ax.set_xticks(x, [band_label(e, b) for b in bands], fontsize=10, color=t["ink"])
+    ax.tick_params(axis="x", length=0, pad=8)
+    ax.set_xlim(-0.6, len(bands) - 0.4)
+    ax.set_ylim(0, 545)   # headroom so the value above a full bar never meets the legend
+    ax.set_yticks(range(0, 501, 100))
+    ax.set_ylabel("Average return (steps in band, max 500)")
+    ax.grid(axis="x", visible=False)
+    ax.spines["left"].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    ax.legend(loc="lower left", bbox_to_anchor=(0, 1.02), ncol=2, borderaxespad=0,
+              handlelength=1.2, columnspacing=1.6)
+    plain_title(fig, ax, "Average return of PPO vs best fixed move cost", t)
     save(fig, out, "01_returns", theme)
     return rows
 
@@ -487,44 +498,49 @@ def fig_action_usage(e: Exp, t, out, theme):
     return rows
 
 
-def fig_policy_map(e: Exp, t, out, theme):
-    """How often each cost is chosen at each population: the learned control law."""
-    rows = []
+def fig_policy_map(e: Exp, t, out, theme, skip_start=10, bin_size=5, min_steps=20):
+    """The learned control law: average move cost chosen at each population."""
     bands = list(e.bands)
-    edges = np.arange(0, 210, 5)
-    # Start the ramp one step off the surface, so P = 0 (a cost never chosen at
-    # that population) reads differently from a blank bin with too few steps.
-    cmap = LinearSegmentedColormap.from_list("seq", [t["seq_zero"]] + t["seq"][1:])
-    fig, axes = plt.subplots(1, len(bands), figsize=(3.2 * len(bands), 3.6), sharey=True)
+    rows = []
+    fig, axes = plt.subplots(1, len(bands), figsize=(11, 4.1), sharey=True)
+    fig.subplots_adjust(left=0.07, right=0.99, top=0.72, bottom=0.16, wspace=0.12)
+    edges = np.arange(0, 205, bin_size)
     for ax, band in zip(axes, bands):
         raw = e.raw(band, "ppo_greedy")
-        live = raw["live"]
+        # Skip the first few steps: the population is still growing from its
+        # start of 16 and passes briefly through low counts it never revisits.
+        live = raw["live"].copy()
+        live[:, :skip_start] = False
         pop = np.rint(raw["obs"][..., 1] * e.max_pop)[live]   # population when acting
-        act = raw["actions"][live]
-        H, _, _ = np.histogram2d(pop, act, bins=[edges, np.arange(len(e.costs) + 1) - 0.5])
-        counts = H.sum(axis=1, keepdims=True)
-        P = np.where(counts >= 20, H / np.maximum(counts, 1), np.nan)  # P(cost | pop bin)
-        ax.imshow(P.T, origin="lower", aspect="auto", cmap=cmap, vmin=0, vmax=1,
-                  extent=(edges[0], edges[-1], -0.5, len(e.costs) - 0.5))
-        lo, hi = e.bands[band]
-        for b in (lo, hi):
-            ax.axvline(b, color=t["ink2"], lw=1, ls=(0, (3, 2)))
-        ax.set_title(e.band_title(band), fontsize=9.5)
-        ax.set_xlabel("Population when acting")
-        ax.grid(False)
-        for i in range(len(edges) - 1):
-            if counts[i, 0] < 20:
+        cost = e.costs[raw["actions"][live]]
+        idx = np.digitize(pop, edges) - 1
+        centers, means = [], []
+        for b in range(len(edges) - 1):
+            m = idx == b
+            if m.sum() < min_steps:
                 continue
-            for a in range(len(e.costs)):
-                rows.append({"band": band, "pop_bin_low": edges[i], "pop_bin_high": edges[i + 1],
-                             "action": a, "move_cost": e.costs[a], "n_steps_in_bin": int(counts[i, 0]),
-                             "p_action_given_pop": P[i, a]})
-    axes[0].set_yticks(range(len(e.costs))[::2], [f"{c:g}" for c in e.costs[::2]])
-    axes[0].set_ylabel("Move cost chosen")
-    suptitle(fig, "The learned control law",
-             "Share of steps choosing each cost, given the population (greedy PPO). Palest = "
-             "never; blank = fewer than 20 steps. Dashed = band edges.", t)
-    fig.tight_layout(rect=(0, 0, 1, 0.9))
+            centers.append(edges[b] + bin_size / 2)
+            means.append(cost[m].mean())
+            rows.append({"band": band, "pop_bin_low": int(edges[b]),
+                         "pop_bin_high": int(edges[b + 1]), "n_steps": int(m.sum()),
+                         "mean_move_cost": round(float(cost[m].mean()), 3)})
+        lo, hi = e.bands[band]
+        ax.axvspan(lo, hi, color=t["band_fill"], alpha=t["band_alpha"] * 1.6, lw=0, zorder=0,
+                   label="Target band")
+        ax.plot(centers, means, color=t["ppo_greedy"], lw=2.2, zorder=2,
+                label="PPO move cost")
+        ax.set_title(band_label(e, band).replace("\n", "  "), fontsize=10.5, loc="left")
+        ax.set_xlim(0, 200)
+        ax.set_xticks(range(0, 201, 50))
+        ax.set_ylim(0, 2.75)
+        ax.set_xlabel("Population")
+        ax.tick_params(length=0)
+        ax.spines["left"].set_visible(False)
+    axes[0].set_ylabel("Average move cost")
+    axes[0].set_yticks([0, 0.5, 1, 1.5, 2, 2.5], ["0", "0.5", "1", "1.5", "2", "2.5"])
+    axes[0].legend(loc="lower left", bbox_to_anchor=(0, 1.17), ncol=2, borderaxespad=0,
+                   handlelength=1.4, columnspacing=1.6)
+    plain_title(fig, axes[0], "PPO policy: average move cost vs population", t)
     save(fig, out, "08_policy_map", theme)
     return rows
 

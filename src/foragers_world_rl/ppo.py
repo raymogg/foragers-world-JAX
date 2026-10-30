@@ -24,6 +24,7 @@ baselines in agent.py, so it is scored by the exact same `evaluate`.
 from __future__ import annotations
 
 import argparse
+import functools
 import pickle
 import sys
 import time
@@ -40,13 +41,18 @@ import optax
 from foragers_world_rl.agent import N_ACTIONS, evaluate, record, report
 from foragers_world_rl.world import (
     DEFAULT_BAND,
+    OBS_FEATURES,
     EnvState,
     env_step,
     init_env_state,
     observe,
 )
 
-OBS_DIM = 3
+# The features the network sees, by name from world.OBS_FEATURES. The default
+# is the original three, so configs and saved params from before `growth`
+# existed behave exactly as they did.
+DEFAULT_OBS_FEATURES = ("food", "population", "energy")
+OBS_DIM = len(DEFAULT_OBS_FEATURES)
 
 CONFIG = dict(
     num_envs=256,
@@ -64,7 +70,20 @@ CONFIG = dict(
     anneal_lr=True,
     hidden=64,
     band=DEFAULT_BAND,        # target population band the reward is for
+    obs_features=DEFAULT_OBS_FEATURES,
 )
+
+
+def feature_index(features) -> tuple[int, ...]:
+    unknown = set(features) - set(OBS_FEATURES)
+    if unknown:
+        raise ValueError(f"unknown obs features {sorted(unknown)}; choose from {OBS_FEATURES}")
+    return tuple(OBS_FEATURES.index(f) for f in features)
+
+
+def select(obs: jax.Array, features) -> jax.Array:
+    """Full env observation (..., len(OBS_FEATURES)) -> the policy's features."""
+    return obs[..., jnp.array(feature_index(features))]
 
 
 # ---------------------------------------------------------------------- network
@@ -81,17 +100,17 @@ def _dense(key, n_in, n_out, scale):
     return {"w": w, "b": jnp.zeros(n_out)}
 
 
-def init_params(key: jax.Array, hidden: int) -> dict:
+def init_params(key: jax.Array, hidden: int, obs_dim: int = OBS_DIM) -> dict:
     k = jax.random.split(key, 6)
     gain = jnp.sqrt(2.0)
     return {
         "actor": [
-            _dense(k[0], OBS_DIM, hidden, gain),
+            _dense(k[0], obs_dim, hidden, gain),
             _dense(k[1], hidden, hidden, gain),
             _dense(k[2], hidden, N_ACTIONS, 0.01),
         ],
         "critic": [
-            _dense(k[3], OBS_DIM, hidden, gain),
+            _dense(k[3], obs_dim, hidden, gain),
             _dense(k[4], hidden, hidden, gain),
             _dense(k[5], hidden, 1, 1.0),
         ],
@@ -105,7 +124,10 @@ def _mlp(layers, x):
 
 
 def forward(params: dict, obs: jax.Array) -> tuple[jax.Array, jax.Array]:
-    """obs (..., OBS_DIM) -> logits (..., N_ACTIONS), value (...)."""
+    """obs (..., obs_dim) -> logits (..., N_ACTIONS), value (...).
+
+    `obs` is the policy's selected features, not the full env observation.
+    """
     return _mlp(params["actor"], obs), _mlp(params["critic"], obs)[..., 0]
 
 
@@ -114,23 +136,37 @@ def _log_prob(logits, action):
     return jnp.take_along_axis(logp, action[..., None], axis=-1)[..., 0]
 
 
-def ppo_policy(params, obs: jax.Array, key: jax.Array) -> jax.Array:
-    """Sample from the learned policy -- what it was trained as."""
-    logits, _ = forward(params, obs)
-    return jax.random.categorical(key, logits)
+@functools.cache
+def make_policies(features: tuple[str, ...] = DEFAULT_OBS_FEATURES):
+    """(sampled, greedy) policy functions that see only `features`.
+
+    Cached so the same features give the same function objects: the rollout
+    takes the policy as a static jit argument, so a fresh function each call
+    would recompile each call.
+    """
+    features = tuple(features)
+
+    def ppo_policy(params, obs: jax.Array, key: jax.Array) -> jax.Array:
+        """Sample from the learned policy -- what it was trained as."""
+        logits, _ = forward(params, select(obs, features))
+        return jax.random.categorical(key, logits)
+
+    def ppo_greedy_policy(params, obs: jax.Array, key: jax.Array) -> jax.Array:
+        """Most likely action. Usually a little better than sampling once trained."""
+        logits, _ = forward(params, select(obs, features))
+        return jnp.argmax(logits)
+
+    return ppo_policy, ppo_greedy_policy
 
 
-def ppo_greedy_policy(params, obs: jax.Array, key: jax.Array) -> jax.Array:
-    """Most likely action. Usually a little better than sampling once trained."""
-    logits, _ = forward(params, obs)
-    return jnp.argmax(logits)
+ppo_policy, ppo_greedy_policy = make_policies(DEFAULT_OBS_FEATURES)
 
 
 # ---------------------------------------------------------------------- training
 
 
 class Transition(NamedTuple):
-    obs: jax.Array          # obs the action was chosen from
+    obs: jax.Array          # obs the action was chosen from (selected features)
     action: jax.Array
     log_prob: jax.Array     # under the policy that collected it (PPO's "old")
     value: jax.Array
@@ -179,6 +215,8 @@ def make_train(config: dict):
     minibatch_size = batch_size // c["num_minibatches"]
     reward_scale = 1.0 - c["gamma"]
     band = jnp.asarray(c["band"])
+    features = tuple(c["obs_features"])
+    sel = lambda o: select(o, features)
 
     def lr_schedule(count):
         # count is optimiser steps; linear decay to 0 over training.
@@ -192,9 +230,9 @@ def make_train(config: dict):
 
     def init(key: jax.Array) -> Runner:
         key, p_key, env_key = jax.random.split(key, 3)
-        params = init_params(p_key, c["hidden"])
+        params = init_params(p_key, c["hidden"], len(features))
         env_state = jax.vmap(init_env_state)(jax.random.split(env_key, c["num_envs"]))
-        obs = jax.vmap(observe)(env_state)
+        obs = jax.vmap(observe, in_axes=(0, None))(env_state, band)
         return Runner(params, tx.init(params), env_state, obs,
                       jnp.zeros(c["num_envs"]), key)
 
@@ -202,7 +240,7 @@ def make_train(config: dict):
         env_state, obs, ep_return, key = carry
         key, act_key, step_key, reset_key = jax.random.split(key, 4)
 
-        logits, value = forward(params, obs)
+        logits, value = forward(params, sel(obs))
         action = jax.random.categorical(act_key, logits)
         log_prob = _log_prob(logits, action)
 
@@ -218,7 +256,7 @@ def make_train(config: dict):
         # from the final obs instead of treating it as death.
         extinct = next_state.foragers.population == 0
         truncated = done & ~extinct
-        _, final_value = forward(params, next_obs)
+        _, final_value = forward(params, sel(next_obs))
         trunc_bootstrap = jnp.where(truncated, c["gamma"] * final_value, 0.0)
 
         # Auto-reset finished worlds. jnp.where over the whole state pytree,
@@ -228,14 +266,14 @@ def make_train(config: dict):
             lambda r, s: jnp.where(done.reshape((-1,) + (1,) * (s.ndim - 1)), r, s),
             reset_state, next_state,
         )
-        next_obs = jnp.where(done[:, None], jax.vmap(observe)(reset_state), next_obs)
+        next_obs = jnp.where(done[:, None], jax.vmap(observe, in_axes=(0, None))(reset_state, band), next_obs)
 
         # Track true (unscaled) episode returns for logging.
         ep_return = ep_return + reward / reward_scale
         finished = jnp.where(done, ep_return, 0.0)
         ep_return = jnp.where(done, 0.0, ep_return)
 
-        t = Transition(obs, action, log_prob, value, reward, done.astype(jnp.float32),
+        t = Transition(sel(obs), action, log_prob, value, reward, done.astype(jnp.float32),
                        trunc_bootstrap, finished)
         return (next_state, next_obs, ep_return, key), t
 
@@ -272,7 +310,7 @@ def make_train(config: dict):
         )
 
         # 2. GAE, bootstrapping the unfinished tail from the current value.
-        _, last_value = forward(params, obs)
+        _, last_value = forward(params, sel(obs))
         adv, targets = compute_gae(traj, last_value, c["gamma"], c["gae_lambda"])
 
         # 3. update_epochs passes over the batch in shuffled minibatches.
@@ -362,6 +400,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timesteps", type=float, default=CONFIG["total_timesteps"])
+    ap.add_argument("--obs", nargs="+", default=None, choices=OBS_FEATURES,
+                    help=f"features the policy sees (default {' '.join(DEFAULT_OBS_FEATURES)})")
     ap.add_argument("--band", type=int, nargs=2, default=None, metavar=("LOW", "HIGH"),
                     help=f"target population band (default {DEFAULT_BAND[0]} {DEFAULT_BAND[1]}; "
                          "with --load, the band saved alongside the params)")
@@ -377,25 +417,31 @@ def main() -> None:
             params, band = saved["params"], tuple(saved["band"])
         else:
             params, band = saved, DEFAULT_BAND
+        features = tuple(saved.get("obs_features", DEFAULT_OBS_FEATURES)
+                         if "params" in saved else DEFAULT_OBS_FEATURES)
         band = tuple(a.band) if a.band else band
     else:
         band = tuple(a.band) if a.band else DEFAULT_BAND
-        config = {**CONFIG, "total_timesteps": int(a.timesteps), "band": band}
+        features = tuple(a.obs) if a.obs else DEFAULT_OBS_FEATURES
+        config = {**CONFIG, "total_timesteps": int(a.timesteps), "band": band,
+                  "obs_features": features}
         print(f"band {band[0]}-{band[1]}")
         params, _history = train(config, a.seed)
         a.out.parent.mkdir(parents=True, exist_ok=True)
-        a.out.write_bytes(pickle.dumps({"params": jax.device_get(params), "band": band}))
+        a.out.write_bytes(pickle.dumps({"params": jax.device_get(params), "band": band,
+                                        "obs_features": list(features)}))
         print(f"saved {a.out}")
 
     # Score on the same evaluation as the baselines (seed 0, 256 worlds,
     # full 500-step episodes from a fresh start).
-    report(f"ppo (sampled), band {band[0]}-{band[1]}", evaluate(ppo_policy, params, band=band))
-    greedy = evaluate(ppo_greedy_policy, params, band=band)
+    sampled_fn, greedy_fn = make_policies(features)
+    report(f"ppo (sampled), band {band[0]}-{band[1]}", evaluate(sampled_fn, params, band=band))
+    greedy = evaluate(greedy_fn, params, band=band)
     report(f"ppo (greedy), band {band[0]}-{band[1]}", greedy)
     print(f"  actions   {greedy['action_hist']}")
 
     if a.record:
-        record(ppo_greedy_policy, params, 0, a.record, f"ppo band {band[0]}-{band[1]}", band=band)
+        record(greedy_fn, params, 0, a.record, f"ppo band {band[0]}-{band[1]}", band=band)
 
 
 if __name__ == "__main__":

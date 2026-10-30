@@ -23,7 +23,9 @@ RAW DATA. Each .npz holds arrays of shape (worlds, steps):
     rewards[w, t]  reward for step t (1 if pops[w, t] is in band)
     dones[w, t]    episode ended at step t
     live[w, t]     step t is part of the episode (False after extinction)
-    obs[w, t, :]   observation the action at step t was chosen from
+    obs[w, t, :]   full env observation the action at step t was chosen from;
+                   features named by `obs_feature_names` (world.OBS_FEATURES).
+                   The policy may have seen only some of them (meta.json).
 
 plus `band`, `move_costs`, and `world_seed`. Steps after an episode ends are
 still in the arrays (scan has a fixed length) but `live` is False for them, and
@@ -67,7 +69,7 @@ from foragers_world_rl.agent import (
     record,
 )
 from foragers_world_rl.ppo import CONFIG as PPO_DEFAULTS
-from foragers_world_rl.ppo import ppo_greedy_policy, ppo_policy, train
+from foragers_world_rl.ppo import DEFAULT_OBS_FEATURES, make_policies, train
 
 MOVE_COSTS = np.asarray(W.MOVE_COSTS)
 
@@ -209,6 +211,7 @@ def save_raw(path: Path, traj, band, seed, policy):
         dones=traj["dones"].astype(bool),
         live=t < m_live["length"][:, None],
         obs=traj["obs"].astype(np.float32),
+        obs_feature_names=np.asarray(W.OBS_FEATURES),
         band=np.asarray(band),
         move_costs=MOVE_COSTS,
         world_seed=seed,
@@ -300,17 +303,22 @@ def run(config_path: Path, skip_train: bool, force: bool):
         # --- train (or load) ------------------------------------------------
         params_path = out / "params" / f"{band_name}.pkl"
         if skip_train:
-            params = pickle.loads(params_path.read_bytes())["params"]
+            saved = pickle.loads(params_path.read_bytes())
+            params = saved["params"]
+            features = tuple(saved.get("obs_features", DEFAULT_OBS_FEATURES))
         else:
+            features = tuple(ppo_cfg_base["obs_features"])
             params, history = train({**ppo_cfg_base, "band": band}, train_seed)
             params_path.parent.mkdir(parents=True, exist_ok=True)
             params_path.write_bytes(pickle.dumps({"params": jax.device_get(params),
-                                                  "band": band}))
+                                                  "band": band,
+                                                  "obs_features": list(features)}))
             write_csv(out / "training" / f"{band_name}.csv", [
                 {**{k: v for k, v in h.items() if k != "action_hist"},
                  **{f"n_action_{a}": n for a, n in enumerate(h["action_hist"])}}
                 for h in history
             ])
+        ppo_policy, ppo_greedy_policy = make_policies(features)
 
         # --- evaluate -------------------------------------------------------
         # Every fixed action goes in the summary; the best one is also kept raw.

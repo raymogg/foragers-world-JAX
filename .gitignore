@@ -20,5 +20,4 @@ runs/*
 # Experiment outputs: commit configs, metrics, raw arrays and params; the
 # viewer-format episodes are large (3-5 MB each) and regenerable with
 # `foragers-experiment <config> --skip-train`.
-results/*/episodes/
-results/*/web/
+results/

@@ -91,7 +91,7 @@ def rollout(policy_fn, params, key: jax.Array, band=DEFAULT_BAND):
         state = carry
         act_key, env_key = jax.random.split(step_key)
 
-        obs = observe(state)
+        obs = observe(state, band)
         action = policy_fn(params, obs, act_key)
         state, _obs_after, reward, done = env_step(state, action, env_key, band)
 
@@ -195,7 +195,7 @@ def record(
     for step_key in step_keys[:steps]:
         act_key, env_key = jax.random.split(step_key)
 
-        obs = observe(state)
+        obs = observe(state, band)
         action = policy_fn(params, obs, act_key)
         state, _obs, reward, done = env_step(state, action, env_key, band)
 

@@ -24,6 +24,7 @@ from foragers_world_rl.ppo import (
     compute_gae,
     forward,
     init_params,
+    ppo_greedy_policy,
     ppo_policy,
 )
 
@@ -103,6 +104,35 @@ def test_initial_policy_is_near_uniform():
     logits, _ = forward(params, jnp.full((OBS_DIM,), 0.5))
     probs = jax.nn.softmax(logits)
     assert jnp.allclose(probs, 1 / N_ACTIONS, atol=0.02), probs
+
+
+def test_policies_see_only_their_features():
+    """make_policies selects features by name from the full env observation."""
+    from foragers_world_rl.ppo import make_policies, select
+    from foragers_world_rl.world import OBS_FEATURES
+
+    full = jnp.arange(len(OBS_FEATURES), dtype=jnp.float32)
+    assert select(full, ("population", "growth")).tolist() == [
+        OBS_FEATURES.index("population"), OBS_FEATURES.index("growth")]
+
+    feats = ("food", "population", "energy", "growth")
+    params = init_params(jax.random.key(0), 16, obs_dim=len(feats))
+    _, greedy = make_policies(feats)
+    assert 0 <= int(greedy(params, full, jax.random.key(1))) < N_ACTIONS
+    # Same features -> same function object, so jit does not recompile.
+    assert make_policies(feats)[1] is greedy
+
+
+def test_default_policy_ignores_growth():
+    """Params trained before `growth` existed see only the original three."""
+    from foragers_world_rl.world import OBS_FEATURES
+
+    params = init_params(jax.random.key(0), 16)
+    base = jnp.full((len(OBS_FEATURES),), 0.5)
+    g = OBS_FEATURES.index("growth")
+    a = ppo_greedy_policy(params, base, jax.random.key(0))
+    b = ppo_greedy_policy(params, base.at[g].set(-1.0), jax.random.key(0))
+    assert int(a) == int(b)
 
 
 def test_policy_returns_valid_action():

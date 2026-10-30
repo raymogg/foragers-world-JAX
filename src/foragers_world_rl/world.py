@@ -79,6 +79,9 @@ class EnvState(NamedTuple):
     # Step counter lives in the state so lax.scan threads it for us, rather
     # than the caller passing it in and the two drifting apart.
     step_count: jax.Array  # () int
+    # Population before the last step, for the growth observation. Nothing in
+    # the dynamics reads it.
+    prev_population: jax.Array  # () int
 
 # Single move step of all foragers
 def step(world: World, forager: Foragers, key: jax.Array, move_cost: float) -> tuple[Foragers]:
@@ -182,13 +185,30 @@ eat_all = jax.vmap(eat, in_axes=(None, 0, None))
 zero_all = jax.vmap(zero_eaten_food, in_axes=(0, 0))
 regrow_all_food = jax.vmap(regrow_food, in_axes=(0, None))
 
-def observe(state: EnvState) -> jax.Array:
+# Every feature observe() produces, in order. Policies pick which ones they see
+# (ppo's obs_features), so adding a feature here does not change what an
+# existing policy observes.
+OBS_FEATURES = ("food", "population", "energy", "growth", "population_band")
+
+def observe(state: EnvState, band=DEFAULT_BAND) -> jax.Array:
     max_total_food = GRID_SIZE * GRID_SIZE * MAX_FOOD_PER_TILE
+    pop = state.foragers.population
+    # Population relative to the target band: 0 at the band floor, 1 at the
+    # top. Same information as `population`, scaled so the band spans a unit of
+    # input rather than a sliver of 0..MAX_POPULATION (0-30 is 0-0.12 there).
+    low, high = band[0], band[1]
+    pop_band = (pop - low) / jnp.maximum(high - low, 1)
+    # Fractional change since the last step. Each forager has at most one child
+    # per step, so this lies in [-1, 1] at any population size -- unlike a raw
+    # count, a drop from 6 to 3 reads as clearly as one from 100 to 50.
+    growth = (pop - state.prev_population) / jnp.maximum(state.prev_population, 1)
     # return observations as proportion of total
     return jnp.array([
         state.world.total_food / max_total_food,
-        state.foragers.population / MAX_POPULATION,
+        pop / MAX_POPULATION,
         state.foragers.mean_energy / BREED_ENERGY,
+        growth,
+        pop_band,
     ], dtype=jnp.float32)
 
 def init_env_state(key: jax.Array) -> EnvState:
@@ -197,7 +217,9 @@ def init_env_state(key: jax.Array) -> EnvState:
         food_key, (GRID_SIZE, GRID_SIZE), 0, int(MAX_FOOD_PER_TILE) + 1
     ).astype(float)
     world = World(food, jnp.zeros((GRID_SIZE, GRID_SIZE)))
-    return EnvState(init_foragers(forager_key), world, jnp.int32(0))
+    foragers = init_foragers(forager_key)
+    # No previous step yet: start growth at 0.
+    return EnvState(foragers, world, jnp.int32(0), foragers.population)
 
 
 # Initial base for RL -> returns new state, obs, rewards and done.
@@ -226,14 +248,14 @@ def env_step(state: EnvState, action: jax.Array, step_key: jax.Array,
     foragers = breed(foragers)
 
     # Update the state
-    new_state = EnvState(foragers, world, state.step_count + 1)
+    new_state = EnvState(foragers, world, state.step_count + 1, state.foragers.population)
 
     # Reward -> 1 for each step kept in band. jnp.where, not a Python
     # conditional: both branches are evaluated and selected elementwise.
     in_band = foragers.population_in_band(band[0], band[1])
     reward = jnp.where(in_band, 1.0, 0.0)
 
-    obs = observe(new_state)
+    obs = observe(new_state, band)
     # Extinction is terminal; the step cap is what gives scan a fixed length.
     done = (foragers.population == 0) | (new_state.step_count >= EPISODE_STEPS)
 

@@ -1,0 +1,46 @@
+# Floor band with the population observation scaled to the band: does giving
+# the agent finer resolution inside the band stop the crash to zero?
+#
+#   uv run foragers-experiment experiments/floor_band_scaled_pop.toml
+#
+# Compare against the floor band in results/band_sweep. Identical (training
+# seed, PPO settings, the 256 evaluation worlds) except that `population`
+# (population / 256, so the band 0-30 is 0-0.12 of the input) is replaced by
+# `population_band` ((population - low) / (high - low), so the band is 0-1).
+# No growth observation, so this changes one thing against the baseline.
+
+name = "floor_band_scaled_pop"
+description = """
+Floor band (0-30) with the population observation rescaled to the band
+(population / 30 here) instead of to the 256-forager cap. Baseline: the floor
+band in band_sweep, which scored 349.0 greedy with 27% of worlds extinct
+(56 of 68 extinctions in the first 20 steps).
+"""
+output_dir = "results/floor_band_scaled_pop"
+
+[bands]
+floor = [0, 30]
+
+[train]
+seed = 0
+
+[train.ppo]
+total_timesteps = 5_000_000
+obs_features = ["food", "population_band", "energy"]
+
+[eval]
+seed = 0
+worlds = 256
+policies = ["ppo_greedy", "ppo_sampled", "best_fixed", "random"]
+
+[[record]]
+policy = "ppo_greedy"
+which = "median"
+
+[[record]]
+policy = "ppo_greedy"
+which = "worst"
+
+[[record]]
+policy = "best_fixed"
+which = "median"

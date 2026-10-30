@@ -21,6 +21,7 @@ foragers-world-rl = "foragers_world_rl.agent:main"
 foragers-ppo = "foragers_world_rl.ppo:main"
 foragers-experiment = "foragers_world_rl.experiments:main"
 foragers-plots = "foragers_world_rl.plots:main"
+foragers-compare = "foragers_world_rl.compare:main"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
